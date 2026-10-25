@@ -1,0 +1,6 @@
+{
+  "name": "Gestor de Qüestionaris CESC",
+  "description": "Aplicació per a gestionar, respondre i analitzar de forma confidencial el qüestionari de clima escolar i sociometria CESC de l'Institut Mollet.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
