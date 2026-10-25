@@ -44,6 +44,12 @@ import {
 import { SearchableSelect } from "./components/SearchableSelect.js";
 import { SociogramView } from "./components/SociogramView.js";
 
+// Pages has no API: use local persistence without repeated failing requests.
+const STATIC_MODE = import.meta.env.VITE_STATIC_MODE === "true" || location.hostname.endsWith(".github.io");
+const apiFetch: typeof fetch = (input, init) => STATIC_MODE
+  ? Promise.reject(new Error("Mode local: API no disponible"))
+  : fetch(input, init);
+
 const DEFAULT_LOCAL_PASSWORD = "InsM0ll3t";
 
 const INITIAL_SAMPLE_PROJECT: CESCProject = {
@@ -66,7 +72,7 @@ function getLocalProjects(): CESCProject[] {
     const raw = localStorage.getItem("cesc_projects_local");
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed)) return parsed;
     }
   } catch (e) {
     console.warn("Could not read local projects", e);
@@ -142,7 +148,7 @@ export default function App() {
   const [copiedPasswordToast, setCopiedPasswordToast] = useState(false);
 
   // GitHub Pages / Offline mode indicator & guide modal
-  const [isLocalMode, setIsLocalMode] = useState(false);
+  const [isLocalMode, setIsLocalMode] = useState(STATIC_MODE);
   const [showGitHubPagesModal, setShowGitHubPagesModal] = useState(false);
 
   // --- ADMIN LOGIC STATES ---
@@ -248,7 +254,7 @@ export default function App() {
   const fetchAdminData = async () => {
     let serverOk = false;
     try {
-      const pResp = await fetch("/api/admin/projects", {
+      const pResp = await apiFetch("/api/admin/projects", {
         headers: { "Authorization": getAuthToken() }
       });
       if (pResp.ok) {
@@ -268,7 +274,7 @@ export default function App() {
     }
 
     try {
-      const sResp = await fetch("/api/admin/active-session", {
+      const sResp = await apiFetch("/api/admin/active-session", {
         headers: { "Authorization": getAuthToken() }
       });
       if (sResp.ok) {
@@ -297,7 +303,7 @@ export default function App() {
 
   const fetchActiveSessionStatusSilently = async () => {
     try {
-      const sResp = await fetch("/api/admin/active-session", {
+      const sResp = await apiFetch("/api/admin/active-session", {
         headers: { "Authorization": getAuthToken() }
       });
       if (sResp.ok) {
@@ -318,8 +324,8 @@ export default function App() {
 
     // In local / GitHub Pages mode, poll from localStorage
     const localSess = getLocalActiveSession();
+    setActiveSession(localSess);
     if (localSess) {
-      setActiveSession(localSess);
       if (localSess.project) {
         setProjects((prev) =>
           prev.map((proj) => (proj.id === localSess.project.id ? localSess.project : proj))
@@ -330,7 +336,7 @@ export default function App() {
 
   const fetchAdminPassword = async () => {
     try {
-      const resp = await fetch("/api/admin/password", {
+      const resp = await apiFetch("/api/admin/password", {
         headers: { "Authorization": getAuthToken() }
       });
       if (resp.ok) {
@@ -370,7 +376,7 @@ export default function App() {
     setCurrentPasswordDisplay(trimmed);
 
     try {
-      const resp = await fetch("/api/admin/password", {
+      const resp = await apiFetch("/api/admin/password", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -409,7 +415,7 @@ export default function App() {
     const entered = password.trim();
 
     try {
-      const resp = await fetch("/api/auth", {
+      const resp = await apiFetch("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: entered })
@@ -474,7 +480,7 @@ export default function App() {
     setNewProjectTitle("");
 
     try {
-      await fetch("/api/admin/projects", {
+      await apiFetch("/api/admin/projects", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -495,12 +501,17 @@ export default function App() {
     const filtered = existing.filter((p) => p.id !== id);
     saveLocalProjects(filtered);
     setProjects(filtered);
+    const session = getLocalActiveSession();
+    if (session?.project.id === id) {
+      saveLocalActiveSession(null);
+      setActiveSession(null);
+    }
     if (selectedProjectId === id) {
       setSelectedProjectId(filtered[0]?.id || "");
     }
 
     try {
-      await fetch(`/api/admin/projects/${id}`, {
+      await apiFetch(`/api/admin/projects/${id}`, {
         method: "DELETE",
         headers: { "Authorization": getAuthToken() }
       });
@@ -528,7 +539,7 @@ export default function App() {
     }
 
     try {
-      await fetch("/api/admin/projects", {
+      await apiFetch("/api/admin/projects", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -673,7 +684,7 @@ export default function App() {
     setActiveSession(newSession);
 
     try {
-      const resp = await fetch("/api/admin/open-session", {
+      const resp = await apiFetch("/api/admin/open-session", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -697,7 +708,7 @@ export default function App() {
     setActiveSession(null);
 
     try {
-      await fetch("/api/admin/close-session", {
+      await apiFetch("/api/admin/close-session", {
         method: "POST",
         headers: {
           "Authorization": getAuthToken()
@@ -725,7 +736,7 @@ export default function App() {
     }
 
     try {
-      await fetch("/api/admin/reset-responses", {
+      await apiFetch("/api/admin/reset-responses", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -879,7 +890,7 @@ export default function App() {
 
         // Attempt server save if available
         try {
-          await fetch("/api/admin/projects", {
+          await apiFetch("/api/admin/projects", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -910,7 +921,7 @@ export default function App() {
 
     // 1. Try server first
     try {
-      const resp = await fetch(`/api/student/session/${enteredCode}`);
+      const resp = await apiFetch(`/api/student/session/${enteredCode}`);
       if (resp.ok) {
         const data = await resp.json();
         setJoinedSessionData(data);
@@ -941,26 +952,7 @@ export default function App() {
       return;
     }
 
-    // 3. Local fallback: match any existing project by ID or code
-    const localProjs = getLocalProjects();
-    const matched = localProjs.find(
-      (p) => p.id.toUpperCase() === enteredCode || p.title.replace(/[^A-Za-z0-9]/g, "").toUpperCase().includes(enteredCode)
-    );
-    if (matched) {
-      setJoinedSessionData({
-        code: enteredCode,
-        title: matched.title,
-        students: matched.students,
-        questions: matched.questions,
-        allowSelfIdentification: matched.allowSelfIdentification
-      });
-      setStudentAnswers({});
-      setSelectedSelfName("");
-      setStudentActiveQuestionIdx(0);
-      setStudentStep("welcome");
-      return;
-    }
-
+    // No permetre entrar en qüestionaris tancats.
     setStudentCodeError("Aquest codi no correspon a cap qüestionari actiu. Comproveu el codi amb el professor/a.");
   };
 
@@ -1002,7 +994,7 @@ export default function App() {
 
     // Also attempt server sync if available
     try {
-      const resp = await fetch("/api/student/sync", {
+      const resp = await apiFetch("/api/student/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1196,6 +1188,12 @@ export default function App() {
       </header>
 
       {/* MAIN VIEW CONTROLLER GRID */}
+      {isLocalMode && (
+        <div role="status" className="bg-amber-100 border-b-2 border-slate-900 p-3 text-sm text-center">
+          Mode local: dades només en aquest navegador. Els codis no connecten altres dispositius.
+          Exporta còpies JSON per conservar les dades. La contrasenya local no és una protecció de servidor.
+        </div>
+      )}
       <main className="flex-1 flex flex-col max-w-7xl w-full mx-auto p-4 sm:p-6 justify-center">
         
         {/* VIEW 1: ROLE SELECT (LANDING) */}
@@ -2448,7 +2446,7 @@ export default function App() {
                 <span className="w-3 h-3 rounded-full bg-emerald-600 mt-1 shrink-0 animate-pulse"></span>
                 <div className="text-xs space-y-1">
                   <p className="font-black text-emerald-950 uppercase">
-                    ✓ Estat: 100% Compatible amb GitHub Pages
+                    ✓ Estat: Mode local compatible amb GitHub Pages
                   </p>
                   <p className="font-semibold text-emerald-800">
                     L'aplicació compta amb rutes relatives (<code className="bg-emerald-150 px-1 py-0.5 border border-emerald-700 font-mono">base: './'</code>) i emmagatzematge local autònom (<code className="bg-emerald-150 px-1 py-0.5 border border-emerald-700 font-mono">localStorage</code>).
