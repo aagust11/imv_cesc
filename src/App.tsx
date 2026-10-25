@@ -1,3 +1,4 @@
+import { resetStudent } from "./studentAccess";
 import { startHosting, stopHosting, sendToAdmin } from "./liveSession";
 import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./sessionCode.js";
 import React, { useState, useEffect, useRef } from "react";
@@ -53,9 +54,9 @@ const apiFetch: typeof fetch = (input, init) => STATIC_MODE
       if (path.startsWith("/api/student/session/")) {
         return sendToAdmin(path.split("/").pop()!, { type: "join" }).then(data => Response.json(data));
       }
-      if (path === "/api/student/sync") {
+      if ((path === "/api/student/sync" || path === "/api/student/claim")) {
         const body = JSON.parse(String(init?.body || "{}"));
-        return sendToAdmin(body.code, { ...body, type: "sync" }).then(data => Response.json(data));
+        return sendToAdmin(body.code, { ...body, type: path.endsWith("claim") ? "claim" : "sync" }).then(data => Response.json(data));
       }
       return Promise.reject(new Error("API locale"));
     })()
@@ -206,6 +207,9 @@ export default function App() {
 
   // Student answers state: { [questionId]: [name1, name2, name3] }
   const [studentAnswers, setStudentAnswers] = useState<{ [questionId: number]: string[] }>({});
+  const studentAccessRef = useRef<{token: string; deviceId: string} | null>(null);
+  const [claimingStudent, setClaimingStudent] = useState(false);
+  const [studentAccessError, setStudentAccessError] = useState("");
   const [studentSyncStatus, setStudentSyncStatus] = useState<"synced" | "syncing" | "error">("synced");
 
   // --- PRIVACY DELEGATE: TIMER STATE ---
@@ -794,13 +798,14 @@ export default function App() {
 
     // Reset locally
     const existing = getLocalProjects();
-    const updatedList = existing.map((p) => (p.id === projectId ? { ...p, responses: {} } : p));
+    const updatedList = existing.map((p) => (p.id === projectId ? { ...p, responses: {}, participation: {} } : p));
     saveLocalProjects(updatedList);
     setProjects(updatedList);
 
     const localSess = getLocalActiveSession();
     if (localSess && localSess.project.id === projectId) {
       localSess.project.responses = {};
+      localSess.project.participation = {};
       saveLocalActiveSession(localSess);
       setActiveSession({ ...localSess });
     }
@@ -1036,11 +1041,11 @@ export default function App() {
     } finally { sendingResponseRef.current = false; }
   }
 
-  const syncAnswersWithServer = async (answers: typeof studentAnswers, name: string) => {
-    if (!joinedSessionData) return false;
+  const syncAnswersWithServer = async (answers: typeof studentAnswers, name: string, completed = false) => {
+    if (!joinedSessionData || !studentAccessRef.current) return false;
     const payload = {
       code: joinedSessionData.code, sessionId: joinedSessionData.sessionId,
-      studentSessionId, studentName: name || "Anònim", answers
+      studentSessionId, studentName: name, answers, completed, ...studentAccessRef.current
     };
     pendingResponseRef.current = payload;
     sessionStorage.setItem("cesc_pending_response", JSON.stringify(payload));
@@ -1050,8 +1055,7 @@ export default function App() {
 
   const handleStudentSelfIdentify = (name: string) => {
     setSelectedSelfName(name);
-    // Auto sync self name right away
-    syncAnswersWithServer(studentAnswers, name);
+    setStudentAccessError("");
   };
 
   const handleStudentNextStepWelcome = () => {
@@ -1063,12 +1067,27 @@ export default function App() {
     }
   };
 
-  const handleStudentNextStepSelfify = () => {
-    if (!selectedSelfName && joinedSessionData?.allowSelfIdentification) {
-      alert("Si us plau, selecciona el teu nom de la llista desplegable.");
-      return;
-    }
-    setStudentStep("questions");
+  const handleStudentNextStepSelfify = async () => {
+    if (!selectedSelfName || !joinedSessionData || claimingStudent) return;
+    setClaimingStudent(true); setStudentAccessError("");
+    try {
+      let deviceId = localStorage.getItem("cesc_device_id");
+      if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem("cesc_device_id", deviceId); }
+      const response = await apiFetch("/api/student/claim", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ code: joinedSessionData.code, sessionId: joinedSessionData.sessionId, studentName: selectedSelfName, deviceId })
+      });
+      const access = await response.json();
+      if (!response.ok) throw new Error(access.error || "No s’ha autoritzat l’accés.");
+      studentAccessRef.current = { token: access.token, deviceId };
+      setStudentSessionId(access.studentSessionId);
+      sessionStorage.setItem("cesc_student_session_id", access.studentSessionId);
+      pendingResponseRef.current = null; sessionStorage.removeItem("cesc_pending_response");
+      setStudentAnswers(access.answers || {}); setStudentSyncStatus("synced");
+      setStudentStep(access.completed ? "completed" : "questions");
+    } catch (error) {
+      setStudentAccessError(error instanceof Error ? error.message : "No s’ha pogut connectar amb administració.");
+    } finally { setClaimingStudent(false); }
   };
 
   // Choices nomination change for student active question
@@ -1119,7 +1138,7 @@ export default function App() {
       setRevealCountdown(0);
     } else {
       // Keep a visible pending state until the receiver acknowledges the final snapshot.
-      void syncAnswersWithServer(studentAnswers, selectedSelfName);
+      void syncAnswersWithServer(studentAnswers, selectedSelfName, true);
       setStudentStep("completed");
     }
   };
@@ -1135,6 +1154,7 @@ export default function App() {
     const freshId = "stud_" + crypto.randomUUID();
     sessionStorage.setItem("cesc_student_session_id", freshId);
     setStudentSessionId(freshId);
+    studentAccessRef.current = null;
     setStudentCodeInput("");
     setJoinedSessionData(null);
     setStudentStep("join");
@@ -1491,7 +1511,7 @@ export default function App() {
                   </button>
                   <button
                     onClick={handleStudentNextStepWelcome}
-                    className="flex-1 h-12 bg-indigo-650 hover:bg-indigo-700 text-white font-black border-2 border-slate-900 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5 text-sm uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="flex-1 h-12 bg-indigo-600 hover:bg-indigo-700 text-white font-black border-2 border-slate-900 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5 text-sm uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <span>Comença el test</span>
                     <ArrowRight className="w-4 h-4" />
@@ -1522,6 +1542,7 @@ export default function App() {
                       value={selectedSelfName}
                       onChange={handleStudentSelfIdentify}
                       placeholder="Comença a escriure el teu nom i selecciona'l..."
+                      disabled={claimingStudent}
                       id="student-self-identify-dropdown"
                     />
                   </div>
@@ -1533,6 +1554,7 @@ export default function App() {
                   )}
                 </div>
 
+                {studentAccessError && <p role="alert" className="p-3 bg-rose-100 text-rose-900 border-2 border-rose-900 font-bold">{studentAccessError}</p>}
                 <div className="flex gap-4 pt-4">
                   <button
                     onClick={() => setStudentStep("welcome")}
@@ -1541,13 +1563,13 @@ export default function App() {
                     Enrere
                   </button>
                   <button
-                    disabled={!selectedSelfName}
+                    disabled={!selectedSelfName || claimingStudent}
                     onClick={handleStudentNextStepSelfify}
                     className={`flex-1 h-11 text-white font-black border-2 border-slate-900 text-sm uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer
-                      ${selectedSelfName ? "bg-indigo-650 hover:bg-indigo-700 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5" : "bg-slate-200 text-slate-400 cursor-not-allowed"}
+                      ${selectedSelfName ? "bg-indigo-600 hover:bg-indigo-700 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5" : "bg-slate-200 text-slate-400 cursor-not-allowed"}
                     `}
                   >
-                    <span>Continua cap al test</span>
+                    <span>{claimingStudent ? "Comprovant accés…" : "Continua cap al test"}</span>
                     <ArrowRight className="w-4.5 h-4.5" />
                   </button>
                 </div>
@@ -1711,7 +1733,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={handleQuestionNext}
-                          className="h-11 px-6 bg-indigo-650 hover:bg-indigo-700 text-white border-2 border-slate-900 flex items-center gap-1.5 text-xs font-black uppercase shadow-[3px_3px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 transition-all cursor-pointer"
+                          className="h-11 px-6 bg-indigo-600 hover:bg-indigo-700 text-white border-2 border-slate-900 flex items-center gap-1.5 text-xs font-black uppercase shadow-[3px_3px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 transition-all cursor-pointer"
                         >
                           <span>
                             {studentActiveQuestionIdx === joinedSessionData.questions.length - 1 ? "Finalitza el test" : "Següent pregunta"}
@@ -1903,7 +1925,7 @@ export default function App() {
                     <button
                       disabled={isOpeningSession}
                       onClick={() => handleOpenSessionToAnswers(activeProject.id)}
-                      className="w-full h-11 bg-indigo-600 hover:bg-indigo-705 text-white text-xs font-black border-2 border-slate-900 shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-y-0.5 transition-all text-center flex items-center justify-center gap-1.5 uppercase cursor-pointer"
+                      className="w-full h-11 bg-indigo-600 hover:bg-indigo-600 text-white text-xs font-black border-2 border-slate-900 shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-y-0.5 transition-all text-center flex items-center justify-center gap-1.5 uppercase cursor-pointer"
                     >
                       <Play className="w-4 h-4" />
                       {isOpeningSession ? "Connectant…" : "Obre a respostes d’alumnes"}
@@ -2153,12 +2175,13 @@ export default function App() {
                         <input
                           type="checkbox"
                           id="checkbox-self-id"
-                          checked={activeProject.allowSelfIdentification}
-                          onChange={handleToggleSelfIdentificationSetting}
+                          checked={true}
+                          disabled
+                          title="Identificació obligatòria per limitar cada alumne a un dispositiu"
                           className="w-4 h-4 text-indigo-600 border-2 border-slate-900 focus:ring-1 focus:ring-indigo-150 cursor-pointer"
                         />
                         <label htmlFor="checkbox-self-id" className="text-xs font-black text-slate-800 cursor-pointer select-none uppercase tracking-wider">
-                          Autoidentificació de l'Alumne (Pregunta Inicial)
+                          Identificació obligatòria · un navegador per alumne
                         </label>
                       </div>
                     </div>
@@ -2231,7 +2254,7 @@ export default function App() {
                               <div className="flex gap-2 justify-end">
                                 <button
                                   onClick={handleUpdateQuestion}
-                                  className="h-8 px-3.5 bg-indigo-650 hover:bg-indigo-700 text-white border-2 border-slate-900 shadow-[1px_1px_0px_rgba(0,0,0,1)] text-xs font-black uppercase cursor-pointer"
+                                  className="h-8 px-3.5 bg-indigo-600 hover:bg-indigo-700 text-white border-2 border-slate-900 shadow-[1px_1px_0px_rgba(0,0,0,1)] text-xs font-black uppercase cursor-pointer"
                                 >
                                   Guarda Modificació
                                 </button>
@@ -2279,6 +2302,33 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+
+                  <section className="space-y-3 border-t-2 border-slate-900 pt-4">
+                    <h3 className="text-xl font-black uppercase">Seguiment de l’alumnat</h3>
+                    <p className="text-sm">Cada alumne queda vinculat al primer navegador amb què comença. Pot reprendre’l des del mateix navegador. Per canviar de dispositiu o repetir el test, reinicia’n les dades.</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse text-sm">
+                        <thead><tr className="bg-indigo-100"><th className="p-2 text-left">Alumne</th><th className="p-2 text-left">Estat</th><th className="p-2 text-left">Accions</th></tr></thead>
+                        <tbody>{activeProject.students.map(name => {
+                          const responses = (Object.values(activeProject.responses || {}) as StudentResponse[]).filter(r => r.studentName === name);
+                          const started = responses.length > 0 || Object.hasOwn(activeProject.participation || {}, name);
+                          const finished = responses.some(r => !!r.completedAt);
+                          return <tr key={name} className="border-b border-slate-300">
+                            <td className="p-2 font-bold">{name}</td>
+                            <td className="p-2">{finished ? "Acabat" : started ? "En curs" : "No iniciat"}</td>
+                            <td className="p-2"><button disabled={!started}
+                              onClick={() => {
+                                const typed = prompt(`Per esborrar les respostes i permetre tornar a contestar, escriu el nom exacte de l’alumne:\n${name}`);
+                                if (typed === null) return;
+                                if (typed.trim() !== name) { alert("El nom no coincideix. No s’ha esborrat cap dada."); return; }
+                                void handleSaveProjectDetails(resetStudent(activeProject, name));
+                              }}
+                              className="bg-rose-700 text-white font-bold px-3 py-2 disabled:bg-slate-200 disabled:text-slate-500">Esborra i permet tornar a contestar</button></td>
+                          </tr>;
+                        })}</tbody>
+                      </table>
+                    </div>
+                  </section>
 
                   {/* CONFIG SECTION 3: REAL-TIME SOCIOMÈTRIC ANALYSIS (SOCIOGRAMVIEW) */}
                   <div className="space-y-4 pt-4 border-t-2 border-slate-950">

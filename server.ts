@@ -1,3 +1,4 @@
+import { claimStudent } from "./src/studentAccess.js";
 import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./src/sessionCode.js";
 import express from "express";
 import path from "path";
@@ -151,6 +152,7 @@ async function startServer() {
 
     activeSession = {
       code,
+      sessionId: crypto.randomUUID(),
       project
     };
 
@@ -167,8 +169,10 @@ async function startServer() {
     const project = projects[projectId];
     if (project) {
       project.responses = {};
+      project.participation = {};
       if (activeSession && activeSession.project.id === projectId) {
         activeSession.project.responses = {};
+      project.participation = {};
       }
       res.json({ success: true, project });
     } else {
@@ -194,8 +198,17 @@ async function startServer() {
       title: activeSession.project.title,
       students: activeSession.project.students,
       questions: activeSession.project.questions,
-      allowSelfIdentification: activeSession.project.allowSelfIdentification
+      allowSelfIdentification: true,
+      sessionId: activeSession.sessionId
     });
+  });
+
+  app.post("/api/student/claim", (req, res) => {
+    if (!activeSession || req.body.code !== activeSession.code || req.body.sessionId !== activeSession.sessionId) {
+      return res.status(400).json({ error: "La sessió ja no està activa." });
+    }
+    try { res.json(claimStudent(activeSession.project, req.body)); }
+    catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : "Accés no autoritzat." }); }
   });
 
   // Sync / Auto-save student answers in real-time
@@ -207,8 +220,16 @@ async function startServer() {
       return res.status(400).json({ error: "Aquest qüestionari ja no està actiu o s'ha tancat." });
     }
 
-    // Store in active session project
     const currentProject = activeSession.project;
+    const access = Object.hasOwn(currentProject.participation || {}, studentName) ? currentProject.participation![studentName] : undefined;
+    if (!access || access.token !== req.body.token || access.deviceId !== req.body.deviceId || access.studentSessionId !== studentSessionId || req.body.sessionId !== activeSession.sessionId) {
+      return res.status(403).json({ error: "Accés no autoritzat o reiniciat." });
+    }
+    if (currentProject.responses[studentSessionId]?.completedAt) {
+      const previous = currentProject.responses[studentSessionId];
+      if (req.body.completed && JSON.stringify(previous.answers) === JSON.stringify(answers)) return res.json({success:true});
+      return res.status(409).json({error:"Aquest alumne ja ha acabat."});
+    }
     
     // Set response entry
     const timestamp = new Date().toISOString();
@@ -221,7 +242,8 @@ async function startServer() {
         ...(existingResponse?.answers || {}),
         ...answers
       },
-      updatedAt: timestamp
+      updatedAt: timestamp,
+      ...(req.body.completed === true ? { completedAt: timestamp } : {})
     };
 
     currentProject.responses[studentSessionId] = updatedResponse;

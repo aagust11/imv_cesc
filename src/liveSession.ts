@@ -1,3 +1,4 @@
+import { claimStudent } from "./studentAccess";
 import Peer, { type DataConnection } from 'peerjs';
 import type { ActiveSession, CESCProject, StudentResponse } from './types';
 import { SESSION_CODE_PATTERN } from './sessionCode';
@@ -34,18 +35,34 @@ export function processStudentRequest(message: any) {
   const project = session.project;
   if (message.type === 'join') return {
     code: session.code, title: project.title, students: project.students,
-    questions: project.questions, allowSelfIdentification: project.allowSelfIdentification,
+    questions: project.questions, allowSelfIdentification: true,
     sessionId: session.sessionId,
   };
+  const projects: CESCProject[] = JSON.parse(localStorage.getItem(PROJECTS_KEY) || '[]');
+  const stored = projects.find(p => p.id === project.id);
+  if (!stored) throw new Error('El qüestionari ja no existeix.');
+  const persist = () => {
+    session.project = stored;
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    window.dispatchEvent(new Event('cesc-live-response'));
+  };
+  if (message.type === 'claim') {
+    if (message.sessionId !== session.sessionId) throw new Error('Torna a entrar amb el codi de la sessió actual.');
+    const access = claimStudent(stored, message);
+    persist();
+    return access;
+  }
   if (message.type !== 'sync' || typeof message.studentSessionId !== 'string' ||
       !/^[a-zA-Z0-9_-]{1,100}$/.test(message.studentSessionId) ||
       message.sessionId !== session.sessionId ||
       !message.answers || typeof message.answers !== 'object' || Array.isArray(message.answers)) {
     throw new Error('Enviament no vàlid. Torna a entrar amb el codi.');
   }
-  const name = message.studentName || 'Anònim';
-  if (typeof name !== 'string' || (project.allowSelfIdentification && !project.students.includes(name))) {
-    throw new Error('Selecciona un alumne de la llista.');
+  const name = message.studentName;
+  const access = typeof name === 'string' && Object.hasOwn(stored.participation || {}, name) ? stored.participation![name] : undefined;
+  if (!access || access.token !== message.token || access.deviceId !== message.deviceId || access.studentSessionId !== message.studentSessionId) {
+    throw new Error('Aquest accés no està autoritzat o s’ha reiniciat. Torna a entrar al qüestionari.');
   }
   const answers: Record<number, string[]> = {};
   for (const [key, choices] of Object.entries(message.answers)) {
@@ -57,18 +74,20 @@ export function processStudentRequest(message: any) {
   }
   const response: StudentResponse = {
     studentSessionId: message.studentSessionId,
-    studentName: project.allowSelfIdentification ? name : 'Anònim',
+    studentName: name,
     answers, updatedAt: new Date().toISOString(),
   };
-  const projects: CESCProject[] = JSON.parse(localStorage.getItem(PROJECTS_KEY) || '[]');
-  const stored = projects.find(p => p.id === project.id);
-  if (!stored) throw new Error('El qüestionari ja no existeix.');
+  const previous = stored.responses[response.studentSessionId];
+  if (previous?.completedAt) {
+    if (!message.completed || JSON.stringify(previous.answers) !== JSON.stringify(answers)) {
+      throw new Error('Aquest alumne ja ha acabat. Només administració pot permetre tornar a contestar.');
+    }
+    return { success: true }; // Lost final ACK can safely be retried.
+  }
+  if (message.completed === true) response.completedAt = new Date().toISOString();
   stored.responses = { ...stored.responses, [response.studentSessionId]: response };
-  session.project = stored;
-  // ACK is returned only after both writes succeed. Duplicate submissions replace the same record.
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
-  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  window.dispatchEvent(new Event('cesc-live-response'));
+  access.updatedAt = response.updatedAt;
+  persist();
   return { success: true };
 }
 

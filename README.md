@@ -32,3 +32,11 @@ El workflow de Pages compila amb `VITE_STATIC_MODE=true` i publica `dist/` despr
 ## Proves de connexió
 
 `npm run test:live` inicia un servidor de senyalització de prova i Vite i comprova la comunicació WebRTC entre contextos de navegador separats. Cal instal·lar Chromium amb `npx playwright install chromium` la primera vegada. El servidor de prova no forma part del desplegament a Pages.
+
+## Participació individual
+
+La identificació és obligatòria. El primer navegador que comença reserva l’alumne al dispositiu docent. Altres navegadors/dispositius queden bloquejats; el mateix navegador pot reprendre les seves respostes. Aquesta vinculació utilitza un identificador aleatori desat a localStorage, no una identificació física de l’ordinador ni una verificació de la identitat real de l’alumne. No es comparteixen tokens d’accés amb els altres alumnes.
+
+El seguiment d’administració mostra **No iniciat**, **En curs** i **Acabat**. Acabat exigeix que s’hagi rebut el lliurament final; les respostes parcials no compten com a acabades. Un lliurament acabat no admet més modificacions.
+
+Per alliberar un alumne, prem **Esborra i permet tornar a contestar** i escriu el seu nom exacte. S’esborren només les seves respostes i es revoca l’accés anterior. Pot començar de nou des d’un altre navegador. Si es perd el localStorage del navegador alumne o ja hi havia respostes d’una versió antiga, cal aquest reinici individual. El reinici global allibera tots els alumnes.

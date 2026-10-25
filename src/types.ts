@@ -14,6 +14,7 @@ export interface StudentResponse {
   studentName: string; // The self-identified name, or "Anònim" if disabled/not specified
   answers: { [questionId: number]: string[] }; // Map of question ID to the 3 selected names
   updatedAt: string;
+  completedAt?: string;
 }
 
 export interface CESCProject {
@@ -23,6 +24,7 @@ export interface CESCProject {
   students: string[]; // List of student names
   questions: CESCQuestion[]; // Customized or default questions
   allowSelfIdentification: boolean; // Toggle for student self-identification
+  participation?: Record<string, { deviceId: string; studentSessionId: string; token: string; updatedAt: string }>;
   responses: { [studentSessionId: string]: StudentResponse }; // Responses indexed by studentSessionId
 }
 
