@@ -15,6 +15,7 @@ export interface StudentResponse {
   answers: { [questionId: number]: string[] }; // Map of question ID to the 3 selected names
   updatedAt: string;
   completedAt?: string;
+  lastAnswerAt?: string;
 }
 
 export interface CESCProject {
@@ -24,7 +25,10 @@ export interface CESCProject {
   students: string[]; // List of student names
   questions: CESCQuestion[]; // Customized or default questions
   allowSelfIdentification: boolean; // Toggle for student self-identification
-  participation?: Record<string, { deviceId: string; studentSessionId: string; token: string; updatedAt: string }>;
+  accessMode?: "shared" | "individual";
+  codePrefix?: string;
+  studentCodes?: Record<string, string>;
+  participation?: Record<string, { deviceId: string; studentSessionId: string; token: string; updatedAt: string; lastSeenAt?: string }>;
   responses: { [studentSessionId: string]: StudentResponse }; // Responses indexed by studentSessionId
 }
 

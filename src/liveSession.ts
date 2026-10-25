@@ -36,7 +36,7 @@ export function processStudentRequest(message: any) {
   if (message.type === 'join') return {
     code: session.code, title: project.title, students: project.students,
     questions: project.questions, allowSelfIdentification: true,
-    sessionId: session.sessionId,
+    sessionId: session.sessionId, accessMode: project.accessMode || "shared",
   };
   const projects: CESCProject[] = JSON.parse(localStorage.getItem(PROJECTS_KEY) || '[]');
   const stored = projects.find(p => p.id === project.id);
@@ -53,16 +53,22 @@ export function processStudentRequest(message: any) {
     persist();
     return access;
   }
-  if (message.type !== 'sync' || typeof message.studentSessionId !== 'string' ||
+  if (message.type !== 'sync' && message.type !== 'heartbeat') throw new Error('Petició no vàlida.');
+  if (typeof message.studentSessionId !== 'string' ||
       !/^[a-zA-Z0-9_-]{1,100}$/.test(message.studentSessionId) ||
       message.sessionId !== session.sessionId ||
-      !message.answers || typeof message.answers !== 'object' || Array.isArray(message.answers)) {
+      (message.type === 'sync' && (!message.answers || typeof message.answers !== 'object' || Array.isArray(message.answers)))) {
     throw new Error('Enviament no vàlid. Torna a entrar amb el codi.');
   }
   const name = message.studentName;
   const access = typeof name === 'string' && Object.hasOwn(stored.participation || {}, name) ? stored.participation![name] : undefined;
   if (!access || access.token !== message.token || access.deviceId !== message.deviceId || access.studentSessionId !== message.studentSessionId) {
     throw new Error('Aquest accés no està autoritzat o s’ha reiniciat. Torna a entrar al qüestionari.');
+  }
+  access.lastSeenAt = new Date().toISOString();
+  if (message.type === 'heartbeat') {
+    persist();
+    return { success: true };
   }
   const answers: Record<number, string[]> = {};
   for (const [key, choices] of Object.entries(message.answers)) {
@@ -75,7 +81,7 @@ export function processStudentRequest(message: any) {
   const response: StudentResponse = {
     studentSessionId: message.studentSessionId,
     studentName: name,
-    answers, updatedAt: new Date().toISOString(),
+    answers, updatedAt: new Date().toISOString(), lastAnswerAt: new Date().toISOString(),
   };
   const previous = stored.responses[response.studentSessionId];
   if (previous?.completedAt) {

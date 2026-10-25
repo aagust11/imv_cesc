@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
 import { PeerServer } from 'peer';
 import { createServer } from 'vite';
@@ -35,10 +36,12 @@ try {
   await admin.getByText('Connectat · rebent respostes', { exact: true }).waitFor();
   const session = await admin.evaluate(() => JSON.parse(localStorage.getItem('cesc_active_session_local')));
   for (const page of [student,other]) await page.goto('http://127.0.0.1:15173');
-  const rpc = (page, payload) => page.evaluate(async ({payload}) => {
+  let groupCode='AB1234';
+  let liveSessionId=session.sessionId;
+  const rpc = (page, payload) => page.evaluate(async ({payload,groupCode}) => {
     const {sendToAdmin} = await import('/src/liveSession.ts');
-    return sendToAdmin('AB1234',payload);
-  },{payload:{...payload,sessionId:session.sessionId}});
+    return sendToAdmin(groupCode,payload);
+  },{payload:{...payload,sessionId:liveSessionId},groupCode});
   await student.getByRole('button', {name: 'Contestar Qüestionari', exact: true}).click();
   await student.locator('#form-student-join input').fill('ab1234');
   await student.getByRole('button', {name: "Entra a l'aula", exact: true}).click();
@@ -59,9 +62,11 @@ try {
   await student.locator('#nominacio-select-q1-0').click();
   await student.getByText('Alumne B',{exact:true}).click();
   await studentContext.setOffline(true);
-  const finish=student.getByRole('button',{name:'Finalitza el test',exact:true});
+  const finish=student.getByRole('button',{name:'Revisa abans d’enviar',exact:true});
   assert.notEqual(await finish.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)');
   await finish.click();
+  await student.getByRole('heading',{name:'Revisa el qüestionari abans d’enviar-lo'}).waitFor();
+  await student.getByRole('button',{name:'Confirma i envia definitivament',exact:true}).click();
   await student.getByRole('heading',{name:'Pendent de confirmació'}).waitFor();
   await studentContext.setOffline(false);
   await student.getByRole('heading',{name:'Qüestionari enregistrat!'}).waitFor({timeout:45000});
@@ -73,6 +78,21 @@ try {
   const claimB=await rpc(other,{type:'claim',studentName:'Alumne B',deviceId:'device-student-b-123'});
   const payloadB={type:'sync',studentName:'Alumne B',deviceId:'device-student-b-123',token:claimB.token,studentSessionId:claimB.studentSessionId,answers:{1:['Alumne A']}};
   await rpc(other,payloadB);
+  const rowB=admin.getByRole('row').filter({has:admin.getByRole('cell',{name:'Alumne B',exact:true})});
+  await rowB.getByRole('cell',{name:'1 / 1',exact:true}).waitFor();
+  assert.equal(await admin.locator('#input-single-student').isDisabled(),true);
+  const lastAnswer=await admin.evaluate(()=>Object.values(JSON.parse(localStorage.getItem('cesc_projects_local'))[0].responses).find(r=>r.studentName==='Alumne B').lastAnswerAt);
+  await admin.evaluate(()=>{
+    const projects=JSON.parse(localStorage.getItem('cesc_projects_local'));
+    projects[0].participation['Alumne B'].lastSeenAt=new Date(Date.now()-60000).toISOString();
+    const session=JSON.parse(localStorage.getItem('cesc_active_session_local'));session.project=projects[0];
+    localStorage.setItem('cesc_projects_local',JSON.stringify(projects));localStorage.setItem('cesc_active_session_local',JSON.stringify(session));window.dispatchEvent(new Event('cesc-live-response'));
+  });
+  await rowB.getByText('Sense comunicació recent (>45 s)',{exact:false}).waitFor();
+  await rpc(other,{...payloadB,type:'heartbeat'});
+  await rowB.getByText('Comunicació recent',{exact:false}).waitFor();
+  assert.equal(await admin.evaluate(()=>Object.values(JSON.parse(localStorage.getItem('cesc_projects_local'))[0].responses).find(r=>r.studentName==='Alumne B').lastAnswerAt),lastAnswer);
+  console.log('PASS: frozen controls, answer progress, stale communication warning and heartbeat without false answer update');
   assert.deepEqual((await rpc(other,{type:'claim',studentName:'Alumne B',deviceId:'device-student-b-123'})).answers,{1:['Alumne A']});
   await admin.reload();
   await admin.getByRole('button',{name:'Accés Administració',exact:true}).click();
@@ -104,6 +124,38 @@ try {
   console.log('PASS: exact-name confirmation, individual deletion, reset releases device ownership');
   await admin.getByRole('button',{name:'Tancar sessió de respostes',exact:true}).click();
   await assert.rejects(rpc(other,payloadB));
+  assert.equal(await admin.locator('#input-single-student').isDisabled(),false);
+  await admin.evaluate(()=>localStorage.setItem('cesc_projects_local',JSON.stringify([{
+    id:'private',title:'Grup privat',createdAt:new Date().toISOString(),students:['Alumne privat','Company privat'],
+    questions:[{id:1,text:'Primera',description:'Prova'},{id:2,text:'Segona',description:'Prova'}],responses:{},allowSelfIdentification:true,accessMode:'individual',codePrefix:'CE'
+  }])));
+  await admin.reload();await admin.getByRole('button',{name:'Accés Administració',exact:true}).click();
+  await admin.locator('#admin-session-code').fill('AC1234');
+  await admin.getByRole('button',{name:'Obre a respostes d’alumnes',exact:true}).click();
+  await admin.getByText('Connectat · rebent respostes',{exact:true}).waitFor();
+  const privateSession=await admin.evaluate(()=>JSON.parse(localStorage.getItem('cesc_active_session_local')));
+  liveSessionId=privateSession.sessionId;groupCode='AC1234';
+  const code=privateSession.project.studentCodes['Alumne privat'];
+  const downloadEvent=admin.waitForEvent('download');
+  await admin.getByRole('button',{name:'Descarrega targetes NOM + CODI per imprimir',exact:true}).click();
+  const download=await downloadEvent;
+  const html=await readFile(await download.path(),'utf8');assert(html.includes('Alumne privat')&&html.includes(code)&&html.includes('AC1234'));
+  await assert.rejects(rpc(other,{type:'claim',studentName:'Alumne privat',deviceId:'private-device-12345'}));
+  await student.reload();await student.getByRole('button',{name:'Contestar Qüestionari',exact:true}).click();
+  await student.locator('#form-student-join input').fill('AC1234');await student.getByRole('button',{name:"Entra a l'aula",exact:true}).click();
+  await student.getByRole('button',{name:'Comença el test',exact:true}).click();
+  await student.locator('#individual-student-code').fill(code);await student.getByRole('button',{name:'Continua cap al test',exact:true}).click();
+  await student.getByRole('button',{name:'Següent pregunta',exact:true}).click();
+  await student.getByRole('button',{name:'Revisa abans d’enviar',exact:true}).click();
+  await student.getByText('0 de 2 preguntes amb resposta.',{exact:true}).waitFor();
+  await student.getByRole('button',{name:'Revisa pregunta 1',exact:true}).click();
+  await student.locator('#nominacio-select-q1-0').click();await student.getByText('Company privat',{exact:true}).click();
+  await student.getByRole('button',{name:'Següent pregunta',exact:true}).click();await student.getByRole('button',{name:'Revisa abans d’enviar',exact:true}).click();
+  await student.getByText('1 de 2 preguntes amb resposta.',{exact:true}).waitFor();
+  await student.getByRole('button',{name:'Confirma i envia definitivament',exact:true}).click();
+  await student.getByRole('heading',{name:'Qüestionari enregistrat!'}).waitFor();
+  console.log('PASS: private codes reject name bypass, printable name/code download, blank summary, review correction and final submission');
+  await admin.getByRole('button',{name:'Tancar sessió de respostes',exact:true}).click();
   assert.deepEqual(errors,[]);
 } catch(error) { console.error('Browser errors:',errors); throw error; }
 finally { await browser.close(); await vite.close(); signalling?.close(); }

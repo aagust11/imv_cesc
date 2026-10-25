@@ -1,3 +1,4 @@
+import { ensureStudentCodes, configurationIsFrozen } from "./src/questionnaireControls.js";
 import { claimStudent } from "./src/studentAccess.js";
 import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./src/sessionCode.js";
 import express from "express";
@@ -118,14 +119,19 @@ async function startServer() {
     if (!project.id) {
       project.id = "cesc_" + Math.random().toString(36).substr(2, 9);
     }
+    if (activeSession?.project.id === project.id && configurationIsFrozen(activeSession.project, project)) {
+      return res.status(409).json({error:"Tanca la sessió abans de canviar la configuració."});
+    }
     project.createdAt = project.createdAt || new Date().toISOString();
     project.responses = project.responses || {};
     projects[project.id] = project;
+    if (activeSession?.project.id === project.id) activeSession.project = project;
     res.json({ success: true, project });
   });
 
   app.delete("/api/admin/projects/:id", adminAuth, (req, res) => {
     const { id } = req.params;
+    if (activeSession?.project.id === id) return res.status(409).json({error:"Tanca la sessió abans d’eliminar el qüestionari."});
     delete projects[id];
     // If deleted project is active, close the session
     if (activeSession && activeSession.project.id === id) {
@@ -137,7 +143,7 @@ async function startServer() {
   // Open/Close Questionnaire session for students
   app.post("/api/admin/open-session", adminAuth, (req, res) => {
     const { projectId, code: requestedCode } = req.body;
-    const project = projects[projectId];
+    let project = projects[projectId];
     if (!project) {
       return res.status(404).json({ error: "Projecte no trobat" });
     }
@@ -150,13 +156,15 @@ async function startServer() {
       return res.status(400).json({ error: "El codi ha de tenir exactament 6 lletres o números." });
     }
 
+    try { project = ensureStudentCodes(project); projects[projectId] = project; }
+    catch(error) { return res.status(400).json({error:(error as Error).message}); }
     activeSession = {
       code,
       sessionId: crypto.randomUUID(),
       project
     };
 
-    res.json({ success: true, code, project });
+    res.json({ success: true, ...activeSession });
   });
 
   app.post("/api/admin/close-session", adminAuth, (req, res) => {
@@ -199,7 +207,8 @@ async function startServer() {
       students: activeSession.project.students,
       questions: activeSession.project.questions,
       allowSelfIdentification: true,
-      sessionId: activeSession.sessionId
+      sessionId: activeSession.sessionId,
+      accessMode: activeSession.project.accessMode || "shared"
     });
   });
 
@@ -209,6 +218,16 @@ async function startServer() {
     }
     try { res.json(claimStudent(activeSession.project, req.body)); }
     catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : "Accés no autoritzat." }); }
+  });
+
+  app.post("/api/student/heartbeat", (req, res) => {
+    const {code,sessionId,studentName,token,deviceId,studentSessionId} = req.body;
+    const access = activeSession?.project.participation?.[studentName];
+    if (!activeSession || activeSession.code !== code || activeSession.sessionId !== sessionId || !access || access.token !== token || access.deviceId !== deviceId || access.studentSessionId !== studentSessionId) {
+      return res.status(403).json({error:"Accés no autoritzat."});
+    }
+    access.lastSeenAt = new Date().toISOString();
+    res.json({success:true});
   });
 
   // Sync / Auto-save student answers in real-time
@@ -242,10 +261,11 @@ async function startServer() {
         ...(existingResponse?.answers || {}),
         ...answers
       },
-      updatedAt: timestamp,
+      updatedAt: timestamp, lastAnswerAt: timestamp,
       ...(req.body.completed === true ? { completedAt: timestamp } : {})
     };
 
+    access.lastSeenAt = timestamp;
     currentProject.responses[studentSessionId] = updatedResponse;
 
     // Persist changes back into main projects map as well!

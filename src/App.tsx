@@ -1,3 +1,4 @@
+import { ensureStudentCodes, configurationIsFrozen, answeredQuestions, studentCodeSheet } from "./questionnaireControls";
 import { resetStudent } from "./studentAccess";
 import { startHosting, stopHosting, sendToAdmin } from "./liveSession";
 import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./sessionCode.js";
@@ -54,9 +55,9 @@ const apiFetch: typeof fetch = (input, init) => STATIC_MODE
       if (path.startsWith("/api/student/session/")) {
         return sendToAdmin(path.split("/").pop()!, { type: "join" }).then(data => Response.json(data));
       }
-      if ((path === "/api/student/sync" || path === "/api/student/claim")) {
+      if ((path === "/api/student/sync" || path === "/api/student/claim" || path === "/api/student/heartbeat")) {
         const body = JSON.parse(String(init?.body || "{}"));
-        return sendToAdmin(body.code, { ...body, type: path.endsWith("claim") ? "claim" : "sync" }).then(data => Response.json(data));
+        return sendToAdmin(body.code, { ...body, type: path.endsWith("claim") ? "claim" : path.endsWith("heartbeat") ? "heartbeat" : "sync" }).then(data => Response.json(data));
       }
       return Promise.reject(new Error("API locale"));
     })()
@@ -165,6 +166,8 @@ export default function App() {
   // --- ADMIN LOGIC STATES ---
   const [projects, setProjects] = useState<CESCProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [newProjectAccessMode, setNewProjectAccessMode] = useState<"shared" | "individual">("shared");
+  const [newProjectPrefix, setNewProjectPrefix] = useState("CE");
   const [newProjectTitle, setNewProjectTitle] = useState("");
   const [bulkInput, setBulkInput] = useState("");
   const [editingStudent, setEditingStudent] = useState<{ index: number; name: string } | null>(null);
@@ -199,15 +202,18 @@ export default function App() {
     students: string[];
     questions: CESCQuestion[];
     allowSelfIdentification: boolean;
+    accessMode?: "shared" | "individual";
   } | null>(null);
 
-  const [studentStep, setStudentStep] = useState<"join" | "welcome" | "selfify" | "questions" | "completed">("join");
+  const [studentStep, setStudentStep] = useState<"join" | "welcome" | "selfify" | "questions" | "review" | "completed">("join");
   const [selectedSelfName, setSelectedSelfName] = useState("");
   const [studentActiveQuestionIdx, setStudentActiveQuestionIdx] = useState(0);
 
   // Student answers state: { [questionId]: [name1, name2, name3] }
   const [studentAnswers, setStudentAnswers] = useState<{ [questionId: number]: string[] }>({});
   const studentAccessRef = useRef<{token: string; deviceId: string} | null>(null);
+  const [individualCodeInput, setIndividualCodeInput] = useState("");
+  const [presenceClock, setPresenceClock] = useState(Date.now());
   const [claimingStudent, setClaimingStudent] = useState(false);
   const [studentAccessError, setStudentAccessError] = useState("");
   const [studentSyncStatus, setStudentSyncStatus] = useState<"synced" | "syncing" | "error">("synced");
@@ -284,6 +290,25 @@ export default function App() {
     const retry = setInterval(() => { if (pendingResponseRef.current) void flushPendingResponse(); }, 5000);
     return () => clearInterval(retry);
   }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setPresenceClock(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (currentView !== "student-portal" || !joinedSessionData || !studentAccessRef.current || !["questions", "review", "completed"].includes(studentStep)) return;
+    let busy = false;
+    const heartbeat = async () => {
+      if (busy) return; busy = true;
+      try { await apiFetch("/api/student/heartbeat", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ code:joinedSessionData.code, sessionId:joinedSessionData.sessionId,
+          studentName:selectedSelfName, studentSessionId, ...studentAccessRef.current })
+      }); } catch {} finally { busy = false; }
+    };
+    const timer = setInterval(() => void heartbeat(), 15000);
+    return () => clearInterval(timer);
+  }, [currentView, studentStep, joinedSessionData, selectedSelfName, studentSessionId]);
 
   // Privacy 10-second mask countdown effect
   useEffect(() => {
@@ -513,11 +538,14 @@ export default function App() {
 
   const handleCreateNewProject = async () => {
     if (!newProjectTitle.trim()) return;
+    if (newProjectAccessMode === "individual" && !/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{2}$/.test(newProjectPrefix.toUpperCase())) {alert("Prefix no vàlid: 2 caràcters, sense 0, O, 1, I ni L.");return;}
 
     const newId = "proj-" + Math.random().toString(36).substr(2, 9);
     const newProj: CESCProject = {
       id: newId,
       title: newProjectTitle.trim(),
+      accessMode: newProjectAccessMode,
+      codePrefix: newProjectPrefix.trim().toUpperCase(),
       createdAt: new Date().toISOString(),
       students: ["Exemple Alumne 1", "Exemple Alumne 2"],
       questions: [...DEFAULT_QUESTIONS],
@@ -548,6 +576,7 @@ export default function App() {
   };
 
   const handleDeleteProject = async (id: string) => {
+    if (getLocalActiveSession()?.project.id === id) { alert("Tanca la sessió abans d’eliminar aquest qüestionari."); return; }
     if (!confirm("Esteu segur que voleu eliminar aquest qüestionari i totes les seves respostes?")) return;
 
     // Filter locally
@@ -576,6 +605,10 @@ export default function App() {
   };
 
   const handleSaveProjectDetails = async (updated: CESCProject) => {
+    const frozen = getLocalActiveSession();
+    if (frozen?.project.id === updated.id && configurationIsFrozen(frozen.project, updated)) {
+      alert("El qüestionari està obert. Tanca la sessió abans de modificar alumnes, preguntes o codis."); return;
+    }
     // 1. Save directly to local storage
     const existing = getLocalProjects();
     const updatedList = existing.map((p) => (p.id === updated.id ? updated : p));
@@ -725,8 +758,11 @@ export default function App() {
 
   // --- RESPONSES SESSION SPREADER (DUAL-MODE) ---
   const handleOpenSessionToAnswers = async (projectId: string) => {
-    const proj = projects.find((p) => p.id === projectId) || getLocalProjects().find((p) => p.id === projectId);
-    if (!proj) return;
+    const original = projects.find((p) => p.id === projectId) || getLocalProjects().find((p) => p.id === projectId);
+    if (!original) return;
+    let proj: CESCProject;
+    try { proj = ensureStudentCodes(original); } catch (error) { setSessionCodeError((error as Error).message); return; }
+    await handleSaveProjectDetails(proj);
 
     // Generate session code
     const baseCode = normalizeSessionCode(adminSessionCode) || generateSessionCode();
@@ -822,6 +858,19 @@ export default function App() {
     } catch (err) {
       // Handled locally
     }
+  };
+
+  const downloadStudentCodes = async (project: CESCProject) => {
+    try {
+      const prepared = ensureStudentCodes(project);
+      if (getLocalActiveSession()?.project.id === project.id && configurationIsFrozen(project, prepared)) {
+        alert("Tanca la sessió abans de generar codis nous."); return;
+      }
+      if (configurationIsFrozen(project, prepared)) await handleSaveProjectDetails(prepared);
+      const url = URL.createObjectURL(new Blob([studentCodeSheet(prepared, activeSession?.project.id === project.id ? activeSession.code : undefined)], {type:"text/html;charset=utf-8"}));
+      const a = document.createElement("a"); a.href=url; a.download="codis-individuals-cesc.html"; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch(error) { alert((error as Error).message); }
   };
 
   // --- EXPORT/IMPORT MECHANISM ---
@@ -950,6 +999,9 @@ export default function App() {
           parsed.id = "proj-" + Math.random().toString(36).substr(2, 9);
         }
 
+        if (getLocalActiveSession()?.project.id === parsed.id) {
+          alert("No es pot importar damunt d’un qüestionari obert. Tanca primer la sessió."); return;
+        }
         // Save directly to localStorage
         const existing = getLocalProjects();
         const existingIdx = existing.findIndex((p) => p.id === parsed.id);
@@ -1068,17 +1120,19 @@ export default function App() {
   };
 
   const handleStudentNextStepSelfify = async () => {
-    if (!selectedSelfName || !joinedSessionData || claimingStudent) return;
+    if (!joinedSessionData || claimingStudent) return;
+    if (joinedSessionData.accessMode === "individual" ? !/^[A-Z0-9]{6}([A-Z0-9]{2})?$/.test(individualCodeInput) : !selectedSelfName) return;
     setClaimingStudent(true); setStudentAccessError("");
     try {
       let deviceId = localStorage.getItem("cesc_device_id");
       if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem("cesc_device_id", deviceId); }
       const response = await apiFetch("/api/student/claim", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ code: joinedSessionData.code, sessionId: joinedSessionData.sessionId, studentName: selectedSelfName, deviceId })
+        body: JSON.stringify({ code: joinedSessionData.code, sessionId: joinedSessionData.sessionId, individualCode: individualCodeInput, studentName:selectedSelfName, deviceId })
       });
       const access = await response.json();
       if (!response.ok) throw new Error(access.error || "No s’ha autoritzat l’accés.");
+      setSelectedSelfName(access.studentName);
       studentAccessRef.current = { token: access.token, deviceId };
       setStudentSessionId(access.studentSessionId);
       sessionStorage.setItem("cesc_student_session_id", access.studentSessionId);
@@ -1123,23 +1177,13 @@ export default function App() {
     const currentQ = joinedSessionData!.questions[studentActiveQuestionIdx];
     const currentChoices = studentAnswers[currentQ.id] || [];
     
-    // Check if at least one nomination is chosen (we don't force all 3 if they don't know, but let's encourage it)
-    const filledCount = currentChoices.filter((n) => n && n.length > 0).length;
-    if (filledCount < 1) {
-      if (!confirm("No has seleccionat cap company per a aquesta pregunta. Estàs segur de voler continuar en blanc?")) {
-        return;
-      }
-    }
-
     if (studentActiveQuestionIdx < joinedSessionData!.questions.length - 1) {
       setStudentActiveQuestionIdx(studentActiveQuestionIdx + 1);
       // Reset privacy reveal timer
       setIsAnswersRevealed(false);
       setRevealCountdown(0);
     } else {
-      // Keep a visible pending state until the receiver acknowledges the final snapshot.
-      void syncAnswersWithServer(studentAnswers, selectedSelfName, true);
-      setStudentStep("completed");
+      setStudentStep("review");
     }
   };
 
@@ -1155,6 +1199,7 @@ export default function App() {
     sessionStorage.setItem("cesc_student_session_id", freshId);
     setStudentSessionId(freshId);
     studentAccessRef.current = null;
+    setIndividualCodeInput("");
     setStudentCodeInput("");
     setJoinedSessionData(null);
     setStudentStep("join");
@@ -1528,32 +1573,18 @@ export default function App() {
                     <span className="w-2.5 h-2.5 rounded-full bg-indigo-700 animate-pulse"></span>
                     <span className="text-xs font-black text-indigo-650 uppercase tracking-wider">Identificació de l'Alumne</span>
                   </div>
-                  <h2 className="text-2xl font-black uppercase text-slate-900">Troba el teu nom a la llista</h2>
-                  <p className="text-xs font-semibold text-slate-500">
-                    Aquesta opció és necessària per enllaçar correctament el teu sociograma amb la resta de dades d'assistència. El teu nom no quedarà exposat mai en públic.
-                  </p>
+                  <h2 className="text-2xl font-black uppercase text-slate-900">{joinedSessionData.accessMode === "individual" ? "Introdueix el teu codi individual" : "Selecciona el teu nom"}</h2>
                 </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-black text-slate-800 mb-1.5 uppercase tracking-wider">La meva fitxa de l'escola</label>
-                    <SearchableSelect
-                      options={joinedSessionData.students}
-                      value={selectedSelfName}
-                      onChange={handleStudentSelfIdentify}
-                      placeholder="Comença a escriure el teu nom i selecciona'l..."
-                      disabled={claimingStudent}
-                      id="student-self-identify-dropdown"
-                    />
-                  </div>
-
-                  {selectedSelfName && (
-                    <div className="p-3 bg-emerald-100 border-2 border-slate-900 text-emerald-900 text-xs font-bold shadow-[2px_2px_0px_rgba(0,0,0,1)]">
-                      ✓ S'ha enllaçat la sessió a l'alumne/a: <strong>{selectedSelfName}</strong>
-                    </div>
-                  )}
-                </div>
-
+                {joinedSessionData.accessMode === "individual" ? <>
+                  <p>Introdueix el codi privat de la teva targeta (6 o 8 caràcters). No el comparteixis.</p>
+                  <label htmlFor="individual-student-code" className="block font-bold">Codi individual</label>
+                  <input id="individual-student-code" value={individualCodeInput} disabled={claimingStudent}
+                    maxLength={8} autoCapitalize="characters" autoComplete="off"
+                    onChange={e => { setIndividualCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")); setStudentAccessError(""); }}
+                    className="w-full border-2 border-slate-900 p-3 font-mono text-xl tracking-widest text-center" />
+                </> : <SearchableSelect options={joinedSessionData.students} value={selectedSelfName}
+                  onChange={handleStudentSelfIdentify} disabled={claimingStudent}
+                  placeholder="Selecciona el teu nom..." id="student-self-identify-dropdown" />}
                 {studentAccessError && <p role="alert" className="p-3 bg-rose-100 text-rose-900 border-2 border-rose-900 font-bold">{studentAccessError}</p>}
                 <div className="flex gap-4 pt-4">
                   <button
@@ -1563,10 +1594,10 @@ export default function App() {
                     Enrere
                   </button>
                   <button
-                    disabled={!selectedSelfName || claimingStudent}
+                    disabled={(joinedSessionData.accessMode === "individual" ? ![6,8].includes(individualCodeInput.length) : !selectedSelfName) || claimingStudent}
                     onClick={handleStudentNextStepSelfify}
                     className={`flex-1 h-11 text-white font-black border-2 border-slate-900 text-sm uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer
-                      ${selectedSelfName ? "bg-indigo-600 hover:bg-indigo-700 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5" : "bg-slate-200 text-slate-400 cursor-not-allowed"}
+                      ${(joinedSessionData.accessMode === "individual" ? [6,8].includes(individualCodeInput.length) : !!selectedSelfName) ? "bg-indigo-600 hover:bg-indigo-700 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5" : "bg-slate-200 text-slate-400 cursor-not-allowed"}
                     `}
                   >
                     <span>{claimingStudent ? "Comprovant accés…" : "Continua cap al test"}</span>
@@ -1736,7 +1767,7 @@ export default function App() {
                           className="h-11 px-6 bg-indigo-600 hover:bg-indigo-700 text-white border-2 border-slate-900 flex items-center gap-1.5 text-xs font-black uppercase shadow-[3px_3px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 transition-all cursor-pointer"
                         >
                           <span>
-                            {studentActiveQuestionIdx === joinedSessionData.questions.length - 1 ? "Finalitza el test" : "Següent pregunta"}
+                            {studentActiveQuestionIdx === joinedSessionData.questions.length - 1 ? "Revisa abans d’enviar" : "Següent pregunta"}
                           </span>
                           <ChevronRight className="w-4.5 h-4.5" />
                         </button>
@@ -1747,6 +1778,24 @@ export default function App() {
                 })()}
 
               </div>
+            )}
+
+            {studentStep === "review" && joinedSessionData && (
+              <section className="bg-white border-4 border-slate-900 p-6 space-y-4 my-4">
+                <h2 className="text-2xl font-black">Revisa el qüestionari abans d’enviar-lo</h2>
+                <p>{answeredQuestions({questions: joinedSessionData.questions} as CESCProject, studentAnswers)} de {joinedSessionData.questions.length} preguntes amb resposta.</p>
+                <p className="bg-amber-100 p-3 font-bold">Les preguntes marcades «En blanc» no tenen cap company seleccionat. Pots revisar-les o lliurar-les en blanc. Després d’enviar, les respostes quedaran bloquejades.</p>
+                <ol className="space-y-2">{joinedSessionData.questions.map((q,index) => {
+                  const count = (studentAnswers[q.id] || []).filter(Boolean).length;
+                  return <li key={q.id} className="border-b border-slate-300 py-2 flex justify-between gap-3 items-center">
+                    <span>{index+1}. {q.text} · <strong>{count ? `${count} seleccions` : "En blanc"}</strong></span>
+                    <button className="bg-indigo-600 text-white px-3 py-2 font-bold" onClick={() => {setStudentActiveQuestionIdx(index);setIsAnswersRevealed(false);setStudentStep("questions");}}>Revisa pregunta {index+1}</button>
+                  </li>;
+                })}</ol>
+                <button className="bg-indigo-700 text-white px-4 py-3 font-bold" onClick={() => {
+                  void syncAnswersWithServer(studentAnswers, selectedSelfName, true); setStudentStep("completed");
+                }}>Confirma i envia definitivament</button>
+              </section>
             )}
 
             {/* STUDY PORTAL STEP E: COMPLETED SUCCESS MESSAGE */}
@@ -1965,6 +2014,13 @@ export default function App() {
                           placeholder="Exemple: 1r ESO B"
                           className="w-full h-9 px-3 border-2 border-slate-900 text-xs bg-white focus:outline-none font-bold placeholder:text-slate-400"
                         />
+                        <label className="block text-xs font-bold" htmlFor="new-access-mode">Mode d’accés</label>
+                        <select id="new-access-mode" value={newProjectAccessMode} onChange={e=>setNewProjectAccessMode(e.target.value as "shared" | "individual")} className="w-full border-2 border-slate-900 p-2 text-sm">
+                          <option value="shared">Codi compartit + selecció del nom</option><option value="individual">Codis individuals per alumne</option>
+                        </select>
+                        {newProjectAccessMode === "individual" && <label className="block text-xs font-bold">Prefix comú (2 caràcters)
+                          <input value={newProjectPrefix} maxLength={2} onChange={e=>setNewProjectPrefix(e.target.value.toUpperCase())} className="w-full border-2 border-slate-900 p-2" />
+                        </label>}
                         <button
                           onClick={handleCreateNewProject}
                           className="w-full h-9 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black border-2 border-slate-900 shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-y-0.5 transition-all flex items-center justify-center gap-1 uppercase cursor-pointer"
@@ -2025,6 +2081,24 @@ export default function App() {
 
                 <div className="p-4 sm:p-6 space-y-8">
                   
+                  {activeSession?.project.id === activeProject.id && <p className="bg-amber-100 p-3 font-bold">Qüestionari obert: alumnes, preguntes i codis bloquejats fins que es tanqui la sessió.</p>}
+                  <fieldset disabled={activeSession?.project.id === activeProject.id} className="space-y-6 disabled:opacity-60">
+                  <section className="space-y-2 border-b-2 border-slate-900 pb-4">
+                    <h3 className="font-black">Mode d’accés i codis</h3>
+                    <select aria-label="Mode d’accés del qüestionari" value={activeProject.accessMode || "shared"} onChange={e => {
+                      if (Object.keys(activeProject.participation || {}).length) {alert("Reinicia totes les respostes abans de canviar el mode d’accés.");return;}
+                      void handleSaveProjectDetails({...activeProject,accessMode:e.target.value as "shared"|"individual"});
+                    }} className="border-2 border-slate-900 p-2 w-full">
+                      <option value="shared">Codi compartit + selecció del nom</option><option value="individual">Codis individuals per alumne</option>
+                    </select>
+                    {activeProject.accessMode === "individual" && <>
+                      <label className="block font-bold">Prefix comú de 2 caràcters
+                        <input aria-label="Prefix dels codis individuals" maxLength={2} value={activeProject.codePrefix || "CE"} className="border-2 border-slate-900 p-2 ml-2 w-24"
+                          onChange={e => void handleSaveProjectDetails({...activeProject,codePrefix:e.target.value.toUpperCase(),studentCodes:{}})} />
+                      </label>
+                      <p className="text-xs">Codis de 6 caràcters; s’amplien a 8 quan s’arriba al 70% de les combinacions del prefix. Sense 0, O, 1, I ni L. Canviar el prefix invalida les targetes anteriors.</p>
+                    </>}
+                  </section>
                   {/* CONFIG SECTION 1: EXCEL CARREGA MASSIVA I ALUMNES */}
                   <div className="space-y-4">
                     <div className="border-b-2 border-slate-900 pb-2">
@@ -2303,19 +2377,32 @@ export default function App() {
                     </div>
                   </div>
 
+                  </fieldset>
                   <section className="space-y-3 border-t-2 border-slate-900 pt-4">
                     <h3 className="text-xl font-black uppercase">Seguiment de l’alumnat</h3>
+                    {activeProject.accessMode === "individual" && <button onClick={() => void downloadStudentCodes(activeProject)} className="bg-indigo-700 text-white font-bold p-3">Descarrega targetes NOM + CODI per imprimir</button>}
+                    {activeProject.accessMode === "individual" && <p className="text-xs">Obre el fitxer descarregat per imprimir-lo o desar-lo en PDF.</p>}
                     <p className="text-sm">Cada alumne queda vinculat al primer navegador amb què comença. Pot reprendre’l des del mateix navegador. Per canviar de dispositiu o repetir el test, reinicia’n les dades.</p>
                     <div className="overflow-x-auto">
                       <table className="w-full border-collapse text-sm">
-                        <thead><tr className="bg-indigo-100"><th className="p-2 text-left">Alumne</th><th className="p-2 text-left">Estat</th><th className="p-2 text-left">Accions</th></tr></thead>
+                        <thead><tr className="bg-indigo-100"><th className="p-2 text-left">Alumne</th><th className="p-2 text-left">Estat</th><th className="p-2 text-left">Preguntes</th><th className="p-2 text-left">Última resposta rebuda</th><th className="p-2 text-left">Comunicació</th><th className="p-2 text-left">Accions</th></tr></thead>
                         <tbody>{activeProject.students.map(name => {
                           const responses = (Object.values(activeProject.responses || {}) as StudentResponse[]).filter(r => r.studentName === name);
                           const started = responses.length > 0 || Object.hasOwn(activeProject.participation || {}, name);
+                          const response = responses[0];
                           const finished = responses.some(r => !!r.completedAt);
+                          const access = activeProject.participation?.[name];
+                          const lastSeen = access?.lastSeenAt ? Date.parse(access.lastSeenAt) : 0;
+                          const recent = lastSeen && presenceClock-lastSeen < 45000;
+                          const runningHere = activeSession?.project.id === activeProject.id;
                           return <tr key={name} className="border-b border-slate-300">
                             <td className="p-2 font-bold">{name}</td>
                             <td className="p-2">{finished ? "Acabat" : started ? "En curs" : "No iniciat"}</td>
+                            <td className="p-2">{answeredQuestions(activeProject,response?.answers)} / {activeProject.questions.length}</td>
+                            <td className="p-2">{response?.lastAnswerAt ? new Date(response.lastAnswerAt).toLocaleTimeString("ca-ES") : "—"}</td>
+                            <td className="p-2">{!started || finished ? "—" : !runningHere ? "Sessió tancada" : recent ? "Comunicació recent" : "Sense comunicació recent (>45 s)"}
+                              {started && !finished && lastSeen > 0 && <span className="block text-xs">Últim senyal: {new Date(lastSeen).toLocaleTimeString("ca-ES")}</span>}
+                            </td>
                             <td className="p-2"><button disabled={!started}
                               onClick={() => {
                                 const typed = prompt(`Per esborrar les respostes i permetre tornar a contestar, escriu el nom exacte de l’alumne:\n${name}`);

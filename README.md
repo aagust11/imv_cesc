@@ -40,3 +40,19 @@ La identificació és obligatòria. El primer navegador que comença reserva l�
 El seguiment d’administració mostra **No iniciat**, **En curs** i **Acabat**. Acabat exigeix que s’hagi rebut el lliurament final; les respostes parcials no compten com a acabades. Un lliurament acabat no admet més modificacions.
 
 Per alliberar un alumne, prem **Esborra i permet tornar a contestar** i escriu el seu nom exacte. S’esborren només les seves respostes i es revoca l’accés anterior. Pot començar de nou des d’un altre navegador. Si es perd el localStorage del navegador alumne o ja hi havia respostes d’una versió antiga, cal aquest reinici individual. El reinici global allibera tots els alumnes.
+
+## Modes d’accés i targetes
+
+En crear el grup es pot triar **Codi compartit + selecció del nom** o **Codis individuals**. Els projectes anteriors conserven el mode compartit. També es pot configurar el mode amb la sessió tancada i sense participacions actives.
+
+Els codis individuals tenen un prefix comú configurable de 2 caràcters i un sufix aleatori. S’utilitza l’alfabet `ABCDEFGHJKMNPQRSTUVWXYZ23456789`, sense `0`, `O`, `1`, `I` ni `L`. Són de 6 caràcters; si el nombre d’alumnes arriba al 70% de les combinacions del sufix de 4 caràcters, es generen de 8. Si ja s’han ampliat a 8, es manté la longitud. No es repeteixen dins del grup i tornar-los a descarregar no els canvia.
+
+**Descarrega targetes NOM + CODI per imprimir** crea un HTML autònom amb targetes retallables. Obriu-lo i premeu **Imprimeix / Desa en PDF**. Conté el nom, el codi privat, l’URL i, si la sessió està oberta, el codi del grup. El mode individual comprova el codi privat al navegador docent; no es pot substituir per la selecció d’un nom.
+
+## Seguiment, congelació i revisió
+
+La taula mostra preguntes amb almenys una selecció, última resposta rebuda i última comunicació. Cada navegador participant envia un senyal aproximadament cada 15 segons. Més de 45 segons sense senyals mostra un avís; és una falta de comunicació recent, no una prova que l’alumne hagi tancat la pestanya. Els senyals no alteren la data de l’última resposta.
+
+Mentre el qüestionari està obert, els alumnes, preguntes, títol, mode d’accés, prefix i codis queden congelats. L’edició està desactivada i també es rebutgen els intents d’importar damunt del qüestionari actiu. El seguiment i els reinicis individuals continuen disponibles. Tanqueu la sessió per editar-la.
+
+L’última pregunta porta a un resum de totes les preguntes amb el nombre de seleccions i l’avís **En blanc**. Es pot tornar a una pregunta per revisar-la. Només **Confirma i envia definitivament** marca el qüestionari com a acabat, després de la confirmació de recepció del docent.
