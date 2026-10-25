@@ -1134,15 +1134,7 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            <button
-              onClick={() => setShowGitHubPagesModal(true)}
-              className="flex items-center gap-1.5 h-9 px-2.5 sm:px-3 text-xs md:text-sm font-black text-emerald-900 bg-emerald-100 hover:bg-emerald-200 border-2 border-slate-900 shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-x-0.5 active:translate-y-0.5 cursor-pointer"
-              title="Informació i guia de desplegament a GitHub Pages"
-            >
-              <Globe className="w-3.5 h-3.5 text-emerald-700" />
-              <span className="hidden sm:inline">GitHub Pages</span>
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            </button>
+
 
             {currentView === "admin-portal" ? (
               <div className="flex items-center gap-2">
