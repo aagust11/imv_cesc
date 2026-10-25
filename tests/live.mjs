@@ -64,6 +64,20 @@ try {
   await student.getByRole('button', {name: "Entra a l'aula", exact: true}).click();
   await student.getByText('Grup prova', {exact: true}).first().waitFor();
   console.log('PASS: alphanumeric student UI joins teacher session from isolated device');
+  await student.getByRole('button', {name: 'Comença el test', exact: true}).click();
+  await student.locator('#student-self-identify-dropdown').click();
+  await student.getByText('Alumne A', {exact: true}).click();
+  await student.getByRole('button', {name: 'Continua cap al test', exact: true}).click();
+  await student.locator('#nominacio-select-q1-0').click();
+  await student.getByText('Alumne B', {exact: true}).click();
+  await studentContext.setOffline(true);
+  await student.getByRole('button', {name: 'Finalitza el test', exact: true}).click();
+  await student.getByRole('heading', {name: 'Pendent de confirmació'}).waitFor();
+  assert.equal(await student.getByRole('button', {name: 'Tanca la sessió', exact: true}).isDisabled(), true);
+  await studentContext.setOffline(false);
+  await student.getByRole('heading', {name: 'Qüestionari enregistrat!'}).waitFor({timeout: 45000});
+  console.log('PASS: complete student UI, pending delivery prevents false success, retry reaches teacher');
+
 
   await admin.reload();
   await admin.getByRole('button', { name: 'Accés Administració', exact: true }).click();
@@ -73,7 +87,7 @@ try {
 
   // Thirty submissions over short-lived channels, simulating a class answering concurrently.
   await Promise.all(Array.from({length: 30}, (_, i) => send({...payload, studentSessionId: `parallel_${i}`})));
-  assert.equal(await admin.evaluate(() => Object.keys(JSON.parse(localStorage.getItem('cesc_projects_local'))[0].responses).length), 31);
+  assert.equal(await admin.evaluate(() => Object.keys(JSON.parse(localStorage.getItem('cesc_projects_local'))[0].responses).length), 32);
   console.log('PASS: 30 concurrent answer submissions are all persisted');
 
   await admin.getByRole('button', { name: 'Tancar sessió de respostes', exact: true }).click();
@@ -90,3 +104,6 @@ try {
   await vite.close();
   signalling?.close();
 }
+
+// PeerServer leaves internal maintenance timers running after HTTP shutdown.
+process.exit(0);
