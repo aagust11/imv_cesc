@@ -24,6 +24,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: npx playwright install --with-deps chromium --only-shell
+      - run: npm run test:live
       - run: npm run build
         env:
           VITE_STATIC_MODE: 'true'

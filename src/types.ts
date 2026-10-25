@@ -27,7 +27,8 @@ export interface CESCProject {
 }
 
 export interface ActiveSession {
-  code: string; // 8-character uppercase session code
+  code: string; // 6-character uppercase alphanumeric code
+  sessionId?: string; // Distinguishes a reopened session with the same code
   project: CESCProject;
 }
 

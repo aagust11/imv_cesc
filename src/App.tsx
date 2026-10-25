@@ -1,3 +1,4 @@
+import { startHosting, stopHosting, sendToAdmin } from "./liveSession";
 import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./sessionCode.js";
 import React, { useState, useEffect, useRef } from "react";
 import {
@@ -30,8 +31,7 @@ import {
   Award,
   Key,
   Copy,
-  Check,
-  Globe
+  Check
 } from "lucide-react";
 
 import {
@@ -48,7 +48,17 @@ import { SociogramView } from "./components/SociogramView.js";
 // Pages has no API: use local persistence without repeated failing requests.
 const STATIC_MODE = import.meta.env.VITE_STATIC_MODE === "true" || location.hostname.endsWith(".github.io");
 const apiFetch: typeof fetch = (input, init) => STATIC_MODE
-  ? Promise.reject(new Error("Mode local: API no disponible"))
+  ? (() => {
+      const path = String(input);
+      if (path.startsWith("/api/student/session/")) {
+        return sendToAdmin(path.split("/").pop()!, { type: "join" }).then(data => Response.json(data));
+      }
+      if (path === "/api/student/sync") {
+        const body = JSON.parse(String(init?.body || "{}"));
+        return sendToAdmin(body.code, { ...body, type: "sync" }).then(data => Response.json(data));
+      }
+      return Promise.reject(new Error("API locale"));
+    })()
   : fetch(input, init);
 
 const DEFAULT_LOCAL_PASSWORD = "InsM0ll3t";
@@ -150,7 +160,6 @@ export default function App() {
 
   // GitHub Pages / Offline mode indicator & guide modal
   const [isLocalMode, setIsLocalMode] = useState(STATIC_MODE);
-  const [showGitHubPagesModal, setShowGitHubPagesModal] = useState(false);
 
   // --- ADMIN LOGIC STATES ---
   const [projects, setProjects] = useState<CESCProject[]>([]);
@@ -174,12 +183,17 @@ export default function App() {
 
   // --- STUDENT WORKFLOW STATES ---
   const [adminSessionCode, setAdminSessionCode] = useState("");
+  const [isOpeningSession, setIsOpeningSession] = useState(false);
+  const [liveStatus, setLiveStatus] = useState("Sessió tancada");
+  const pendingResponseRef = useRef<any>(null);
+  const sendingResponseRef = useRef(false);
   const [sessionCodeError, setSessionCodeError] = useState("");
   const [studentCodeInput, setStudentCodeInput] = useState("");
   const [studentCodeError, setStudentCodeError] = useState("");
   const [studentSessionId, setStudentSessionId] = useState("");
   const [joinedSessionData, setJoinedSessionData] = useState<{
     code: string;
+    sessionId?: string;
     title: string;
     students: string[];
     questions: CESCQuestion[];
@@ -216,6 +230,10 @@ export default function App() {
       sessionStorage.setItem("cesc_student_session_id", cachedSessionId);
     }
     setStudentSessionId(cachedSessionId);
+    try {
+      const pending = JSON.parse(sessionStorage.getItem("cesc_pending_response") || "null");
+      if (pending) { pendingResponseRef.current = pending; setStudentSyncStatus("error"); }
+    } catch {}
   }, []);
 
   // Fetch administrator data if authenticated
@@ -233,6 +251,35 @@ export default function App() {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, [isAdminAuthenticated]);
+
+  useEffect(() => {
+    if (!STATIC_MODE || !isAdminAuthenticated || currentView !== "admin-portal") return;
+    const status = (event: Event) => setLiveStatus((event as CustomEvent).detail);
+    const refresh = () => {
+      setProjects(getLocalProjects());
+      setActiveSession(getLocalActiveSession());
+    };
+    window.addEventListener("cesc-live-status", status);
+    window.addEventListener("cesc-live-response", refresh);
+    const saved = getLocalActiveSession();
+    const recover = () => {
+      const session = getLocalActiveSession();
+      if (session) startHosting(session.code).catch(error => setLiveStatus(error.message));
+    };
+    if (saved) recover();
+    const recoveryTimer = setInterval(recover, 5000);
+    return () => {
+      clearInterval(recoveryTimer);
+      window.removeEventListener("cesc-live-status", status);
+      window.removeEventListener("cesc-live-response", refresh);
+      stopHosting();
+    };
+  }, [isAdminAuthenticated, currentView]);
+
+  useEffect(() => {
+    const retry = setInterval(() => { if (pendingResponseRef.current) void flushPendingResponse(); }, 5000);
+    return () => clearInterval(retry);
+  }, []);
 
   // Privacy 10-second mask countdown effect
   useEffect(() => {
@@ -506,6 +553,7 @@ export default function App() {
     setProjects(filtered);
     const session = getLocalActiveSession();
     if (session?.project.id === id) {
+      stopHosting();
       saveLocalActiveSession(null);
       setActiveSession(null);
     }
@@ -689,8 +737,20 @@ export default function App() {
       project: proj
     };
 
-    saveLocalActiveSession(newSession);
-    setActiveSession(newSession);
+    if (isOpeningSession) return;
+    setIsOpeningSession(true);
+    try {
+      if (STATIC_MODE) await startHosting(baseCode);
+      newSession.sessionId = crypto.randomUUID();
+      saveLocalActiveSession(newSession);
+      setActiveSession(newSession);
+    } catch (error) {
+      stopHosting();
+      setSessionCodeError(error instanceof Error ? error.message : "No s’ha pogut obrir la sessió.");
+      setIsOpeningSession(false);
+      return;
+    }
+    setIsOpeningSession(false);
 
     try {
       const resp = await apiFetch("/api/admin/open-session", {
@@ -713,6 +773,7 @@ export default function App() {
   };
 
   const handleCloseSessionOfAnswers = async () => {
+    stopHosting();
     saveLocalActiveSession(null);
     setActiveSession(null);
 
@@ -934,8 +995,10 @@ export default function App() {
       if (resp.ok) {
         const data = await resp.json();
         setJoinedSessionData(data);
-        setStudentAnswers({});
-        setSelectedSelfName("");
+        const pending = pendingResponseRef.current;
+        const canRestore = pending?.code === data.code && pending?.sessionId === data.sessionId;
+        setStudentAnswers(canRestore ? pending.answers : {});
+        setSelectedSelfName(canRestore ? pending.studentName : "");
         setStudentActiveQuestionIdx(0);
         setStudentStep("welcome");
         return;
@@ -944,84 +1007,45 @@ export default function App() {
       // Server unreachable (GitHub Pages / offline)
     }
 
-    // 2. Local fallback: check active session
-    const localSess = getLocalActiveSession();
-    if (localSess && localSess.code.toUpperCase() === enteredCode) {
-      setJoinedSessionData({
-        code: localSess.code,
-        title: localSess.project.title,
-        students: localSess.project.students,
-        questions: localSess.project.questions,
-        allowSelfIdentification: localSess.project.allowSelfIdentification
-      });
-      setStudentAnswers({});
-      setSelectedSelfName("");
-      setStudentActiveQuestionIdx(0);
-      setStudentStep("welcome");
-      return;
-    }
-
-    // No permetre entrar en qüestionaris tancats.
-    setStudentCodeError("Aquest codi no correspon a cap qüestionari actiu. Comproveu el codi amb el professor/a.");
+    setStudentCodeError("No s’ha pogut connectar. Comprova el codi, Internet i que administració tingui la sessió oberta.");
   };
 
-  // Push immediate answer update to the central server / localStorage
-  const syncAnswersWithServer = async (updatedAnswers: typeof studentAnswers, name: string) => {
-    if (!joinedSessionData) return;
-    setStudentSyncStatus("syncing");
-
-    const studentNameVal = name || "Anònim";
-    const newResponseRecord: StudentResponse = {
-      studentSessionId,
-      studentName: studentNameVal,
-      updatedAt: new Date().toISOString(),
-      answers: updatedAnswers
-    };
-
-    // Always update local storage (ensures 100% functionality on GitHub Pages / shared devices)
+  // A single ordered sender; newest snapshot survives failures and is retried.
+  async function flushPendingResponse(): Promise<boolean> {
+    if (sendingResponseRef.current) return false;
+    sendingResponseRef.current = true;
     try {
-      const localSess = getLocalActiveSession();
-      if (localSess) {
-        if (!localSess.project.responses) localSess.project.responses = {};
-        localSess.project.responses[studentSessionId] = newResponseRecord;
-        saveLocalActiveSession(localSess);
-      }
-
-      const localProjs = getLocalProjects();
-      const updatedProjs = localProjs.map((p) => {
-        if (p.title === joinedSessionData.title || (localSess && p.id === localSess.project.id)) {
-          const respMap = { ...(p.responses || {}) };
-          respMap[studentSessionId] = newResponseRecord;
-          return { ...p, responses: respMap };
+      while (pendingResponseRef.current) {
+        const payload = pendingResponseRef.current;
+        setStudentSyncStatus("syncing");
+        const resp = await apiFetch("/api/student/sync", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!resp.ok || !(await resp.json()).success) throw new Error("No s’ha confirmat la recepció.");
+        if (pendingResponseRef.current === payload) {
+          pendingResponseRef.current = null;
+          sessionStorage.removeItem("cesc_pending_response");
         }
-        return p;
-      });
-      saveLocalProjects(updatedProjs);
-    } catch (e) {
-      console.warn("Could not sync to localStorage", e);
-    }
-
-    // Also attempt server sync if available
-    try {
-      const resp = await apiFetch("/api/student/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: joinedSessionData.code,
-          studentSessionId,
-          studentName: studentNameVal,
-          answers: updatedAnswers
-        })
-      });
-
-      if (resp.ok) {
-        setStudentSyncStatus("synced");
-      } else {
-        setStudentSyncStatus("synced"); // local saved
       }
-    } catch (err) {
-      setStudentSyncStatus("synced"); // local saved
-    }
+      setStudentSyncStatus("synced");
+      return true;
+    } catch {
+      setStudentSyncStatus("error");
+      return false;
+    } finally { sendingResponseRef.current = false; }
+  }
+
+  const syncAnswersWithServer = async (answers: typeof studentAnswers, name: string) => {
+    if (!joinedSessionData) return false;
+    const payload = {
+      code: joinedSessionData.code, sessionId: joinedSessionData.sessionId,
+      studentSessionId, studentName: name || "Anònim", answers
+    };
+    pendingResponseRef.current = payload;
+    sessionStorage.setItem("cesc_pending_response", JSON.stringify(payload));
+    setStudentSyncStatus("syncing");
+    return flushPendingResponse();
   };
 
   const handleStudentSelfIdentify = (name: string) => {
@@ -1076,7 +1100,7 @@ export default function App() {
     }
   };
 
-  const handleQuestionNext = () => {
+  const handleQuestionNext = async () => {
     const currentQ = joinedSessionData!.questions[studentActiveQuestionIdx];
     const currentChoices = studentAnswers[currentQ.id] || [];
     
@@ -1094,7 +1118,8 @@ export default function App() {
       setIsAnswersRevealed(false);
       setRevealCountdown(0);
     } else {
-      // Finished all questionnaire questions!
+      // Keep a visible pending state until the receiver acknowledges the final snapshot.
+      void syncAnswersWithServer(studentAnswers, selectedSelfName);
       setStudentStep("completed");
     }
   };
@@ -1106,6 +1131,10 @@ export default function App() {
   };
 
   const handleResetStudentWorkflow = () => {
+    if (pendingResponseRef.current) return;
+    const freshId = "stud_" + crypto.randomUUID();
+    sessionStorage.setItem("cesc_student_session_id", freshId);
+    setStudentSessionId(freshId);
     setStudentCodeInput("");
     setJoinedSessionData(null);
     setStudentStep("join");
@@ -1191,8 +1220,8 @@ export default function App() {
       {/* MAIN VIEW CONTROLLER GRID */}
       {isLocalMode && (
         <div role="status" className="bg-amber-100 border-b-2 border-slate-900 p-3 text-sm text-center">
-          Mode local: dades només en aquest navegador. Els codis no connecten altres dispositius.
-          Exporta còpies JSON per conservar les dades. La contrasenya local no és una protecció de servidor.
+          Connexió directa entre dispositius. Mantén la consola d’administració oberta per rebre respostes.
+          Les dades es desen al navegador d’administració: exporta còpies JSON.
         </div>
       )}
       <main className="flex-1 flex flex-col max-w-7xl w-full mx-auto p-4 sm:p-6 justify-center">
@@ -1288,7 +1317,7 @@ export default function App() {
             <div className="flex flex-wrap items-center justify-center gap-6 sm:gap-10 pt-4 text-xs font-black uppercase tracking-wider text-slate-500 text-center">
               <span className="flex items-center gap-1.5 bg-indigo-50 border-2 border-slate-900 px-3 py-1.5 shadow-[2px_2px_0px_rgba(0,0,0,1)]">
                 <ShieldCheck className="w-4.5 h-4.5 text-indigo-600" />
-                Xifrat local i privacitat garantida
+                Respostes enviades directament a administració
               </span>
               <span className="flex items-center gap-1.5 bg-rose-50 border-2 border-slate-900 px-3 py-1.5 shadow-[2px_2px_0px_rgba(0,0,0,1)]">
                 <HeartPulse className="w-4.5 h-4.5 text-rose-500" />
@@ -1417,7 +1446,7 @@ export default function App() {
 
                 <div className="pt-2 text-center border-t border-slate-205">
                   <p className="text-[11px] font-bold text-slate-450 uppercase">
-                    S'aconsella estar connectat al mateix wifi del centre per assegurar una conexió òptima amb l'ordinador del professorat.
+                    Cal connexió a Internet i que el professorat mantingui la consola oberta.
                   </p>
                 </div>
               </div>
@@ -1454,6 +1483,7 @@ export default function App() {
 
                 <div className="flex gap-4 pt-2">
                   <button
+                    disabled={studentSyncStatus !== "synced"}
                     onClick={handleResetStudentWorkflow}
                     className="flex-1 h-12 bg-white hover:bg-slate-50 text-slate-700 font-bold border-2 border-slate-900 shadow-[3px_3px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_rgba(0,0,0,1)] hover:translate-x-0.5 hover:translate-y-0.5 text-sm uppercase transition-all cursor-pointer"
                   >
@@ -1550,18 +1580,18 @@ export default function App() {
                   <div className="shrink-0">
                     {studentSyncStatus === "synced" && (
                       <span className="inline-flex items-center gap-1 text-[9px] bg-emerald-100 text-emerald-800 border-2 border-slate-900 font-extrabold px-2.5 py-1 shadow-[1px_1px_0px_rgba(0,0,0,1)] uppercase leading-none">
-                        ● Guardat d'aula actiu
+                        ● Rebut per administració
                       </span>
                     )}
                     {studentSyncStatus === "syncing" && (
                       <span className="inline-flex items-center gap-1 text-[9px] bg-indigo-100 text-indigo-805 border-2 border-slate-900 font-extrabold px-2.5 py-1 shadow-[1px_1px_0px_rgba(0,0,0,1)] uppercase leading-none">
                         <RefreshCw className="w-2.5 h-2.5 animate-spin mr-1" />
-                        Sincronitzant...
+                        Enviant a administració...
                       </span>
                     )}
                     {studentSyncStatus === "error" && (
                       <span className="inline-flex items-center gap-1 text-[9px] bg-rose-100 text-rose-800 border-2 border-slate-900 font-extrabold px-2.5 py-1 shadow-[1px_1px_0px_rgba(0,0,0,1)] uppercase leading-none">
-                        ⚠️ Error de connexió
+                        ⚠️ Pendent de recepció · reintentant
                       </span>
                     )}
                   </div>
@@ -1705,17 +1735,18 @@ export default function App() {
                 </div>
 
                 <div className="space-y-2">
-                  <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase italic">Qüestionari Enregistrat!</h2>
+                  <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase italic">{studentSyncStatus === "synced" ? "Qüestionari enregistrat!" : "Pendent de confirmació"}</h2>
                   <p className="text-sm font-bold text-slate-700">
-                    Moltes gràcies per la teva col·laboració sincera. Les teves dades s'han enviat correctament a l'equip d'orientació.
+                    {studentSyncStatus === "synced" ? "Administració ha rebut i desat les teves respostes. Gràcies!" : "Les respostes encara no s’han confirmat. Mantén aquesta pàgina oberta: es reintentarà automàticament."}
                   </p>
                   <p className="text-xs text-slate-500 font-semibold max-w-md mx-auto leading-relaxed mt-2 uppercase">
-                    Les teves respostes serviran per millorar la cohesió del grup-classe, evitar situacions d'exclusió i enfortir el clima general de convivència. Pots tancar aquesta pàgina de forma segura.
+                    Les teves respostes serviran per millorar la cohesió del grup-classe, evitar situacions d'exclusió i enfortir el clima general de convivència. {studentSyncStatus === "synced" ? "Pots tancar aquesta pàgina." : "No tanquis aquesta pàgina encara."}
                   </p>
                 </div>
 
                 <div className="pt-4 max-w-xs mx-auto">
                   <button
+                    disabled={studentSyncStatus !== "synced"}
                     onClick={handleResetStudentWorkflow}
                     className="w-full h-11 bg-slate-100 hover:bg-slate-205 text-slate-800 text-xs font-black border-2 border-slate-900 shadow-[2px_2px_0px_rgba(0,0,0,1)] uppercase cursor-pointer"
                   >
@@ -1820,10 +1851,11 @@ export default function App() {
                   
                   <h3 className="text-xl font-black uppercase italic tracking-wide">Control de l'Aula</h3>
                   <p className="text-xs text-slate-400 leading-relaxed font-sans font-semibold">
-                    Activa el qüestionari amb un codi de 6 lletres o números. En mode local només funciona en aquest navegador.
+                    Obre el qüestionari amb un codi de 6 lletres o números i mantén aquesta consola oberta per rebre les respostes dels altres dispositius.
                   </p>
                 </div>
 
+                <p role="status" className="text-xs text-amber-200">{liveStatus}</p>
                 {activeSession ? (
                   <div className="space-y-4 py-3 border-y-2 border-slate-800">
                     <div className="text-center bg-slate-800 p-4 border-2 border-slate-700">
@@ -1869,11 +1901,12 @@ export default function App() {
                     </button>
                   ) : activeProject ? (
                     <button
+                      disabled={isOpeningSession}
                       onClick={() => handleOpenSessionToAnswers(activeProject.id)}
                       className="w-full h-11 bg-indigo-600 hover:bg-indigo-705 text-white text-xs font-black border-2 border-slate-900 shadow-[2px_2px_0px_rgba(0,0,0,1)] active:translate-y-0.5 transition-all text-center flex items-center justify-center gap-1.5 uppercase cursor-pointer"
                     >
                       <Play className="w-4 h-4" />
-                      Obre a respostes d'alumnes
+                      {isOpeningSession ? "Connectant…" : "Obre a respostes d’alumnes"}
                     </button>
                   ) : null}
 
@@ -2436,94 +2469,6 @@ export default function App() {
           </div>
         )}
 
-        {/* MODAL: GITHUB PAGES INFORMATION & DEPLOYMENT GUIDE */}
-        {showGitHubPagesModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs animate-fade-in">
-            <div className="bg-white border-4 border-slate-900 w-full max-w-2xl shadow-[8px_8px_0px_rgba(0,0,0,1)] p-6 space-y-5 max-h-[90vh] overflow-y-auto">
-              
-              <div className="flex items-center justify-between border-b-2 border-slate-900 pb-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 bg-emerald-100 border-2 border-slate-900 flex items-center justify-center">
-                    <Globe className="w-4 h-4 text-emerald-800" />
-                  </div>
-                  <h3 className="font-black text-lg text-slate-900 uppercase tracking-tight">
-                    Preparat per a GitHub Pages
-                  </h3>
-                </div>
-                <button
-                  onClick={() => setShowGitHubPagesModal(false)}
-                  className="w-8 h-8 flex items-center justify-center border-2 border-slate-900 hover:bg-slate-100 font-black cursor-pointer text-sm"
-                >
-                  ✕
-                </button>
-              </div>
-
-              {/* Status Banner */}
-              <div className="p-4 bg-emerald-50 border-2 border-emerald-800 flex items-start gap-3">
-                <span className="w-3 h-3 rounded-full bg-emerald-600 mt-1 shrink-0 animate-pulse"></span>
-                <div className="text-xs space-y-1">
-                  <p className="font-black text-emerald-950 uppercase">
-                    ✓ Estat: Mode local compatible amb GitHub Pages
-                  </p>
-                  <p className="font-semibold text-emerald-800">
-                    L'aplicació compta amb rutes relatives (<code className="bg-emerald-150 px-1 py-0.5 border border-emerald-700 font-mono">base: './'</code>) i emmagatzematge local autònom (<code className="bg-emerald-150 px-1 py-0.5 border border-emerald-700 font-mono">localStorage</code>).
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-4 text-xs font-medium text-slate-800 leading-relaxed">
-                <div className="border-2 border-slate-900 p-3.5 bg-slate-50 space-y-2">
-                  <p className="font-black text-slate-900 uppercase flex items-center gap-1.5">
-                    <span className="w-5 h-5 bg-indigo-600 text-white flex items-center justify-center text-[10px] font-black">1</span>
-                    Com funciona a GitHub Pages?
-                  </p>
-                  <p>
-                    GitHub Pages és un allotjament de <strong>fitxers estàtics</strong> (HTML, CSS i JavaScript). Com que a GitHub Pages no s'executa un servidor Node.js backend permanent, l'aplicació activa automàticament el <strong>mode autònom al navegador</strong>:
-                  </p>
-                  <ul className="list-disc pl-5 space-y-1 font-semibold text-slate-700">
-                    <li>La contrasenya de convivència, qüestionaris, preguntes i alumnes es desen al navegador.</li>
-                    <li>Podeu analitzar els sociogrames, generar càlculs i descarregar l'<strong>Excel (.CSV)</strong> amb els números d'ordre dels alumnes.</li>
-                    <li>Mitjançant els botons de <strong>Còpia JSON (Exportar / Importar)</strong>, podeu traslladar qüestionaris i respostes entre qualsevol dispositiu sense dependre de cap servidor.</li>
-                  </ul>
-                </div>
-
-                <div className="border-2 border-slate-900 p-3.5 bg-amber-50 space-y-2">
-                  <p className="font-black text-amber-950 uppercase flex items-center gap-1.5">
-                    <span className="w-5 h-5 bg-amber-500 text-slate-900 flex items-center justify-center text-[10px] font-black">2</span>
-                    Passos per publicar a GitHub Pages
-                  </p>
-                  <ol className="list-decimal pl-5 space-y-1 font-semibold text-amber-950">
-                    <li>Executeu <code className="bg-amber-150 px-1 py-0.5 border border-amber-400 font-mono">npm run build</code> per generar la carpeta <code className="bg-amber-150 px-1 py-0.5 border border-amber-400 font-mono">dist/</code>.</li>
-                    <li>Puja el codi al teu repositori de GitHub.</li>
-                    <li>A GitHub, ves a <strong>Settings → Pages → Source</strong> i selecciona desplegar amb <strong>GitHub Actions</strong> (o des de la branca <code className="font-mono">gh-pages</code>).</li>
-                    <li>Gràcies a <code className="font-mono">base: './'</code> en <code className="font-mono">vite.config.ts</code>, funcionarà directament a <code className="font-mono">https://usuari.github.io/nom-repositori/</code>.</li>
-                  </ol>
-                </div>
-
-                <div className="border-2 border-slate-900 p-3.5 bg-indigo-50 space-y-2">
-                  <p className="font-black text-indigo-950 uppercase flex items-center gap-1.5">
-                    <span className="w-5 h-5 bg-indigo-600 text-white flex items-center justify-center text-[10px] font-black">3</span>
-                    Recollida en viu des dels mòbils dels alumnes
-                  </p>
-                  <p className="text-slate-700">
-                    Perquè 25 o 30 alumnes responguin en temps real des dels seus propis mòbils a classe simultàniament cap a la pantalla del professor, cal una base de dades compartida en temps real. Per a aquesta opció, teniu el fitxer <code className="font-mono font-bold">server.ts</code> inclòs, que podeu executar en xarxa local d'aula (<code className="font-mono">npm run dev</code>) o allotjar de franc en serveis Node.js (Render, Railway, Fly). L'aplicació detecta el servidor automàticament!
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end pt-2 border-t-2 border-slate-900">
-                <button
-                  type="button"
-                  onClick={() => setShowGitHubPagesModal(false)}
-                  className="h-10 px-5 bg-slate-900 text-white text-xs font-black uppercase hover:bg-slate-800 shadow-[2px_2px_0px_rgba(0,0,0,1)] cursor-pointer"
-                >
-                  Entès, tancar
-                </button>
-              </div>
-
-            </div>
-          </div>
-        )}
 
       </main>
 
