@@ -1,3 +1,4 @@
+import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./sessionCode.js";
 import React, { useState, useEffect, useRef } from "react";
 import {
   Lock,
@@ -172,6 +173,8 @@ export default function App() {
   const [newQuestionDesc, setNewQuestionDesc] = useState("");
 
   // --- STUDENT WORKFLOW STATES ---
+  const [adminSessionCode, setAdminSessionCode] = useState("");
+  const [sessionCodeError, setSessionCodeError] = useState("");
   const [studentCodeInput, setStudentCodeInput] = useState("");
   const [studentCodeError, setStudentCodeError] = useState("");
   const [studentSessionId, setStudentSessionId] = useState("");
@@ -674,7 +677,13 @@ export default function App() {
     if (!proj) return;
 
     // Generate session code
-    const baseCode = (proj.title.replace(/[^A-Za-z0-9]/g, "").slice(0, 3) + Math.floor(10 + Math.random() * 90)).toUpperCase();
+    const baseCode = normalizeSessionCode(adminSessionCode) || generateSessionCode();
+    if (!SESSION_CODE_PATTERN.test(baseCode)) {
+      setSessionCodeError("El codi ha de tenir exactament 6 lletres o números.");
+      return;
+    }
+    setSessionCodeError("");
+    setAdminSessionCode(baseCode);
     const newSession: ActiveSession = {
       code: baseCode,
       project: proj
@@ -690,7 +699,7 @@ export default function App() {
           "Content-Type": "application/json",
           "Authorization": getAuthToken()
         },
-        body: JSON.stringify({ projectId })
+        body: JSON.stringify({ projectId, code: baseCode })
       });
 
       if (resp.ok) {
@@ -914,8 +923,8 @@ export default function App() {
     setStudentCodeError("");
 
     const enteredCode = studentCodeInput.trim().toUpperCase();
-    if (!enteredCode) {
-      setStudentCodeError("S'ha d'introduir un codi vàlid.");
+    if (!SESSION_CODE_PATTERN.test(enteredCode)) {
+      setStudentCodeError("Introdueix un codi de 6 lletres o números.");
       return;
     }
 
@@ -1377,7 +1386,7 @@ export default function App() {
                   </span>
                   <h2 className="text-2xl sm:text-3xl font-black uppercase italic text-slate-900">Introdueix el Codi d'Accés</h2>
                   <p className="text-xs sm:text-sm text-slate-600 font-semibold max-w-sm mx-auto">
-                    El teu tutor o orientador t'ha de facilitar el codi generat de 8 lletres per connectar-te amb el qüestionari del teu grup classe.
+                    El teu tutor o orientador t'ha de facilitar el codi generat de 6 lletres o números per connectar-te amb el qüestionari del teu grup classe.
                   </p>
                 </div>
 
@@ -1386,11 +1395,15 @@ export default function App() {
                     <input
                       type="text"
                       required
-                      maxLength={8}
+                      maxLength={6}
+                      minLength={6}
+                      pattern="[A-Za-z0-9]{6}"
+                      autoCapitalize="characters"
+                      autoCorrect="off"
                       autoFocus
-                      placeholder="EXEMPLE: AZKPMWRT"
+                      placeholder="EXEMPLE: A1B2C3"
                       value={studentCodeInput}
-                      onChange={(e) => setStudentCodeInput(e.target.value.toUpperCase().replace(/[^a-zA-Z]/g, ""))}
+                      onChange={(e) => setStudentCodeInput(e.target.value.toUpperCase().replace(/[^a-zA-Z0-9]/g, ""))}
                       className="w-full h-14 text-center text-xl font-bold tracking-widest uppercase border-2 border-slate-900 rounded-none focus:bg-indigo-50 outline-none transition-all placeholder:text-slate-350 bg-white"
                     />
                   </div>
@@ -1815,7 +1828,7 @@ export default function App() {
                   
                   <h3 className="text-xl font-black uppercase italic tracking-wide">Control de l'Aula</h3>
                   <p className="text-xs text-slate-400 leading-relaxed font-sans font-semibold">
-                    Activa el qüestionari d'aquest grup perquè els alumnes puguin accedir-hi des de qualsevol dispositiu introduint el codi de 8 lletres.
+                    Activa el qüestionari amb un codi de 6 lletres o números. En mode local només funciona en aquest navegador.
                   </p>
                 </div>
 
@@ -1842,6 +1855,18 @@ export default function App() {
                 )}
 
                 <div className="space-y-2 pt-2">
+                  {!activeSession && (
+                    <div className="space-y-2">
+                      <label htmlFor="admin-session-code" className="block text-xs font-bold">Codi d’accés (6 lletres o números)</label>
+                      <input id="admin-session-code" type="text" maxLength={6}
+                        value={adminSessionCode} autoCapitalize="characters" autoCorrect="off"
+                        placeholder="Buit: codi automàtic"
+                        onChange={(e) => { setAdminSessionCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")); setSessionCodeError(""); }}
+                        className="w-full p-2 bg-slate-800 text-white border-2 border-slate-600 font-mono uppercase" />
+                      <p className="text-xs text-slate-400">Tria el codi abans d’obrir la sessió o deixa’l buit per generar-lo.</p>
+                      {sessionCodeError && <p role="alert" className="text-xs text-rose-300">{sessionCodeError}</p>}
+                    </div>
+                  )}
                   {activeSession ? (
                     <button
                       onClick={handleCloseSessionOfAnswers}

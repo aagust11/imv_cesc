@@ -1,3 +1,4 @@
+import { generateSessionCode, normalizeSessionCode, SESSION_CODE_PATTERN } from "./src/sessionCode.js";
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -134,17 +135,18 @@ async function startServer() {
 
   // Open/Close Questionnaire session for students
   app.post("/api/admin/open-session", adminAuth, (req, res) => {
-    const { projectId } = req.body;
+    const { projectId, code: requestedCode } = req.body;
     const project = projects[projectId];
     if (!project) {
       return res.status(404).json({ error: "Projecte no trobat" });
     }
 
-    // Generate random 8 letter code
-    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let code = "";
-    for (let i = 0; i < 8; i++) {
-      code += letters.charAt(Math.floor(Math.random() * letters.length));
+    if (requestedCode !== undefined && typeof requestedCode !== "string") {
+      return res.status(400).json({ error: "El codi ha de ser text." });
+    }
+    const code = normalizeSessionCode(requestedCode || "") || generateSessionCode();
+    if (!SESSION_CODE_PATTERN.test(code)) {
+      return res.status(400).json({ error: "El codi ha de tenir exactament 6 lletres o números." });
     }
 
     activeSession = {
@@ -179,7 +181,7 @@ async function startServer() {
   });
 
   // 3. Student experience endpoints
-  // Join session using the 8-letter code
+  // Join session using a 6-character alphanumeric code
   app.get("/api/student/session/:code", (req, res) => {
     const code = req.params.code.toUpperCase().trim();
     if (!activeSession || activeSession.code !== code) {
