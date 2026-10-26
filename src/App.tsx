@@ -1,3 +1,4 @@
+import { diagnoseIce } from "./peerNetwork";
 import { ensureStudentCodes, configurationIsFrozen, answeredQuestions, studentCodeSheet } from "./questionnaireControls";
 import { resetStudent } from "./studentAccess";
 import { startHosting, stopHosting, sendToAdmin } from "./liveSession";
@@ -188,6 +189,7 @@ export default function App() {
   // --- STUDENT WORKFLOW STATES ---
   const [adminSessionCode, setAdminSessionCode] = useState("");
   const [isOpeningSession, setIsOpeningSession] = useState(false);
+  const [networkTest, setNetworkTest] = useState("");
   const [peerRoute, setPeerRoute] = useState("");
   const [liveStatus, setLiveStatus] = useState("Sessió tancada");
   const pendingResponseRef = useRef<any>(null);
@@ -1935,6 +1937,13 @@ export default function App() {
 
                 <p role="status" className="text-xs text-amber-200">{liveStatus}</p>
                 {peerRoute && <p className="text-xs text-slate-300">Última connexió: {peerRoute}</p>}
+                <button className="bg-slate-700 text-white border border-slate-400 px-3 py-2 text-xs font-bold" disabled={networkTest === "Comprovant…"} onClick={async()=>{
+                  setNetworkTest("Comprovant…");
+                  try { const result=await diagnoseIce();setNetworkTest(`STUN: ${result.stun ? "respon" : "sense resposta"}. TURN: ${result.turn ? "respon" : "sense resposta"}. La connexió real es confirma quan entra un alumne.`); }
+                  catch{setNetworkTest("No s’ha pogut completar la prova de xarxa.");}
+                }}>Comprova la xarxa P2P</button>
+                {networkTest && <p role="status" className="text-xs text-amber-200">{networkTest}</p>}
+
                 {activeSession ? (
                   <div className="space-y-4 py-3 border-y-2 border-slate-800">
                     <div className="text-center bg-slate-800 p-4 border-2 border-slate-700">

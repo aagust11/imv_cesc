@@ -1,15 +1,11 @@
 import type { PeerOptions, DataConnection } from 'peerjs';
 
-// Public static-auth demo explicitly documented by the Open Relay Project:
-// https://www.metered.ca/tools/openrelay/ (not a private or account API secret).
+// Use the public servers and credentials shipped by PeerJS itself; add TCP alternatives.
+// No third-party account, private credentials, database or message broker is used.
 export async function defaultIceServers():Promise<RTCIceServer[]> {
-  const username = `${Math.floor(Date.now()/1000)+3600}:cesc`;
-  const key = await crypto.subtle.importKey('raw',new TextEncoder().encode('openrelayprojectsecret'),{name:'HMAC',hash:'SHA-1'},false,['sign']);
-  const signature=await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(username));
-  const credential=btoa(String.fromCharCode(...new Uint8Array(signature)));
   return [
     {urls:['stun:stun.l.google.com:19302','stun:stun.cloudflare.com:3478']},
-    {urls:import.meta.env.VITE_TURN_TLS_ONLY==='true'?['turns:staticauth.openrelay.metered.ca:443?transport=tcp']:['turn:staticauth.openrelay.metered.ca:80?transport=udp','turn:staticauth.openrelay.metered.ca:443?transport=tcp','turns:staticauth.openrelay.metered.ca:443?transport=tcp'],username,credential},
+    {urls:['turn:eu-0.turn.peerjs.com:3478','turn:us-0.turn.peerjs.com:3478','turn:eu-0.turn.peerjs.com:3478?transport=tcp','turn:us-0.turn.peerjs.com:3478?transport=tcp'],username:'peerjs',credential:'peerjsp'},
   ];
 }
 export async function peerOptions():Promise<PeerOptions> {
@@ -35,4 +31,20 @@ export async function reportPeerRoute(connection:DataConnection){
     const relay=local?.candidateType==='relay'||remote?.candidateType==='relay';
     window.dispatchEvent(new CustomEvent('cesc-peer-route',{detail:{relay,text:relay?'WebRTC amb relé TURN · sense desat al servidor':'WebRTC directe entre dispositius'}}));
   }catch{}
+}
+
+export async function diagnoseIce(){
+  const options=await peerOptions();
+  const connection=new RTCPeerConnection(options.config);
+  const result={stun:false,turn:false,hasTurn:(options.config?.iceServers||[]).some(s=>(Array.isArray(s.urls)?s.urls:[s.urls]).some(u=>u.startsWith('turn:')||u.startsWith('turns:')))};
+  try{
+    connection.onicecandidate=event=>{
+      if(event.candidate?.type==='srflx')result.stun=true;
+      if(event.candidate?.type==='relay')result.turn=true;
+    };
+    connection.createDataChannel('network-test');
+    await connection.setLocalDescription(await connection.createOffer());
+    await new Promise(resolve=>setTimeout(resolve,10000));
+    return result;
+  }finally{connection.close();}
 }
