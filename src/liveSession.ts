@@ -1,3 +1,4 @@
+import { peerOptions, reportPeerRoute } from "./peerNetwork";
 import { claimStudent } from "./studentAccess";
 import Peer, { type DataConnection } from 'peerjs';
 import type { ActiveSession, CESCProject, StudentResponse } from './types';
@@ -6,16 +7,6 @@ import { SESSION_CODE_PATTERN } from './sessionCode';
 const SESSION_KEY = 'cesc_active_session_local';
 const PROJECTS_KEY = 'cesc_projects_local';
 const peerId = (code: string) => `imv-cesc-v1-${code}`;
-const options = () => ({
-  debug: import.meta.env.VITE_PEER_DEBUG === "true" ? 3 : 0,
-  ...(import.meta.env.VITE_PEER_HOST ? {
-    host: import.meta.env.VITE_PEER_HOST,
-    port: Number(import.meta.env.VITE_PEER_PORT || 443),
-    path: import.meta.env.VITE_PEER_PATH || '/',
-    secure: import.meta.env.VITE_PEER_SECURE !== 'false',
-  } : {}),
-  ...(import.meta.env.VITE_ICE_SERVERS ? { config: { iceServers: JSON.parse(import.meta.env.VITE_ICE_SERVERS) } } : {}),
-});
 let host: Peer | null = null;
 let opening: Promise<void> | null = null;
 let hostCode = '';
@@ -97,7 +88,7 @@ export function processStudentRequest(message: any) {
   return { success: true };
 }
 
-export function startHosting(code: string): Promise<void> {
+export async function startHosting(code: string): Promise<void> {
   if (!SESSION_CODE_PATTERN.test(code)) return Promise.reject(new Error('Codi no vàlid.'));
   if (hostCode === code && host && !host.destroyed) {
     if (opening) return opening;
@@ -107,7 +98,9 @@ export function startHosting(code: string): Promise<void> {
   }
   stopHosting(); hostCode = code;
   const generation = hostGeneration;
-  const peer = new Peer(peerId(code), options()); host = peer;
+  const configuration=await peerOptions();
+  if(generation!==hostGeneration)throw new Error("Obertura cancel·lada.");
+  const peer = new Peer(peerId(code), configuration); host = peer;
   notify('Connectant…');
   const ready = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => { peer.destroy(); reject(new Error('No es pot obrir la connexió. Comprova Internet i la xarxa.')); }, 20000);
@@ -122,6 +115,7 @@ export function startHosting(code: string): Promise<void> {
     });
     peer.on('connection', (connection: DataConnection) => {
       connection.on('error', () => {});
+      connection.on('open',()=>void reportPeerRoute(connection));
       connection.on('data', (raw: any) => {
         if (!raw || typeof raw.id !== 'string') return;
         try {
@@ -139,29 +133,74 @@ export function startHosting(code: string): Promise<void> {
   return ready;
 }
 
-// One short-lived connection per request avoids keeping a full class of idle peers connected.
-export function sendToAdmin(code: string, payload: object): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const peer = new Peer(options());
-    let connection: DataConnection | undefined;
-    let finished = false;
-    const finish = (error?: Error, data?: any) => {
-      if (finished) return; finished = true; clearTimeout(timer);
-      connection?.close(); peer.destroy();
-      error ? reject(error) : resolve(data);
-    };
-    const timer = setTimeout(() => finish(new Error('No hi ha confirmació d’administració. Mantén aquesta pàgina oberta; es reintentarà.')), 20000);
-    peer.on('error', () => finish(new Error('No es pot connectar amb administració. Comprova el codi i que tingui la consola oberta.')));
-    peer.on('open', () => {
-      connection = peer.connect(peerId(code), { reliable: true, serialization: 'json' });
-      const id = crypto.randomUUID();
-      connection.on('open', () => connection!.send({ ...payload, code, id }));
-      connection.on('data', (reply: any) => {
-        if (reply?.id !== id) return;
-        finish(reply.ok ? undefined : new Error(reply.error), reply.data);
+// Keep the data channel alive across answers/heartbeats; renegotiate only after a real disconnect.
+type Pending={resolve:(value:any)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
+type ClientLink={connection:DataConnection;ready:Promise<DataConnection>;rejectOpen:(error:Error)=>void;pending:Map<string,Pending>};
+let studentPeer:Peer|null=null;
+let studentPeerReady:Promise<Peer>|null=null;
+const clientLinks=new Map<string,ClientLink>();
+function failLink(code:string,error:Error){
+  const link=clientLinks.get(code);if(!link)return;
+  clientLinks.delete(code);link.rejectOpen(error);
+  for(const pending of link.pending.values()){clearTimeout(pending.timer);pending.reject(error);}
+  link.pending.clear();link.connection.close();
+}
+async function getStudentPeer():Promise<Peer>{
+  if(studentPeerReady&&(!studentPeer||!studentPeer.destroyed))return studentPeerReady;
+  studentPeerReady=(async()=>{
+    const peer=new Peer(await peerOptions());studentPeer=peer;
+    return new Promise<Peer>((resolve,reject)=>{
+      const timer=setTimeout(()=>{peer.destroy();reject(new Error('No es pot contactar amb la senyalització WebRTC.'));},20000);
+      peer.on('open',()=>{clearTimeout(timer);resolve(peer);});
+      peer.on('error',error=>{
+        clearTimeout(timer);reject(error);
+        for(const code of [...clientLinks.keys()])failLink(code,new Error('No es pot connectar amb administració. Comprova el codi i la consola oberta.'));
+        if(peer.destroyed){studentPeer=null;studentPeerReady=null;}
       });
-      connection.on('error', () => finish(new Error('Connexió interrompuda.')));
-      connection.on('close', () => { if (!finished) finish(new Error('Administració ha tancat la connexió.')); });
+      peer.on('disconnected',()=>{if(!peer.destroyed)setTimeout(()=>{if(peer.disconnected&&!peer.destroyed)peer.reconnect();},1000);});
+      peer.on('close',()=>{
+        if(studentPeer===peer){studentPeer=null;studentPeerReady=null;}
+        for(const code of [...clientLinks.keys()])failLink(code,new Error('Connexió interrompuda. Es tornarà a intentar.'));
+      });
     });
+  })();
+  return studentPeerReady;
+}
+async function connectionToAdmin(code:string):Promise<DataConnection>{
+  const existing=clientLinks.get(code);if(existing)return existing.ready;
+  const peer=await getStudentPeer();
+  // Another answer may have finished opening the same link while the peer was joining.
+  const raced=clientLinks.get(code);if(raced)return raced.ready;
+  const connection=peer.connect(peerId(code),{reliable:true,serialization:'json'});
+  const link:ClientLink={connection,pending:new Map(),ready:Promise.resolve(connection),rejectOpen:()=>{}};
+  clientLinks.set(code,link);
+  link.ready=new Promise<DataConnection>((resolve,reject)=>{
+    link.rejectOpen=reject;
+    const timer=setTimeout(()=>failLink(code,new Error('La xarxa no permet completar WebRTC. Pot caldre un relé TURN accessible per TCP/TLS 443.')),25000);
+    connection.on('open',()=>{clearTimeout(timer);void reportPeerRoute(connection);resolve(connection);});
+    connection.on('error',()=>{clearTimeout(timer);failLink(code,new Error('Ha fallat la connexió entre els dispositius.'));});
+    connection.on('close',()=>{clearTimeout(timer);failLink(code,new Error('Administració ha tancat la connexió.'));});
+    connection.on('data',(reply:any)=>{
+      const pending=link.pending.get(reply?.id);if(!pending)return;
+      clearTimeout(pending.timer);link.pending.delete(reply.id);
+      reply.ok?pending.resolve(reply.data):pending.reject(new Error(reply.error));
+    });
+  });
+  return link.ready;
+}
+export async function sendToAdmin(code:string,payload:object):Promise<any>{
+  const connection=await connectionToAdmin(code);
+  const link=clientLinks.get(code);
+  if(!link||!connection.open)throw new Error('Connexió interrompuda. Es tornarà a intentar.');
+  return new Promise((resolve,reject)=>{
+    const id=crypto.randomUUID();
+    const timer=setTimeout(()=>{
+      link.pending.delete(id);
+      reject(new Error('Administració no ha confirmat la recepció. Mantén la pàgina oberta.'));
+      failLink(code,new Error('La connexió ha caducat. Es tornarà a obrir.'));
+    },20000);
+    link.pending.set(id,{resolve,reject,timer});
+    try{connection.send({...payload,code,id});}
+    catch{clearTimeout(timer);link.pending.delete(id);reject(new Error('No s’ha pogut enviar. Es tornarà a intentar.'));failLink(code,new Error('Connexió interrompuda.'));}
   });
 }

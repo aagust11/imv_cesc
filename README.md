@@ -56,3 +56,15 @@ La taula mostra preguntes amb almenys una selecció, última resposta rebuda i �
 Mentre el qüestionari està obert, els alumnes, preguntes, títol, mode d’accés, prefix i codis queden congelats. L’edició està desactivada i també es rebutgen els intents d’importar damunt del qüestionari actiu. El seguiment i els reinicis individuals continuen disponibles. Tanqueu la sessió per editar-la.
 
 L’última pregunta porta a un resum de totes les preguntes amb el nombre de seleccions i l’avís **En blanc**. Es pot tornar a una pregunta per revisar-la. Només **Confirma i envia definitivament** marca el qüestionari com a acabat, després de la confirmació de recepció del docent.
+
+## Connexió P2P en xarxes restrictives
+
+L’aplicació no utilitza Supabase ni cap base de dades externa. Les respostes viatgen amb WebRTC i es desen al navegador d’administració. S’ha retirat completament la integració de relé de missatgeria amb Supabase.
+
+Es manté una connexió de dades persistent per navegador i grup, en comptes de renegociar cada resposta i senyal de seguiment. Després d’un tall es torna a connectar i es reintenten les respostes pendents. Només la confirmació del docent indica que s’han desat.
+
+ICE prova connexions directes amb STUN i, quan no són possibles, TURN per UDP, TCP i TLS al port 443. El suport TURN per defecte utilitza el servidor de static-auth i la credencial de demostració publicada expressament per Open Relay: https://www.metered.ca/tools/openrelay/ . La credencial es deriva amb HMAC-SHA1 i caduca en una hora. És infraestructura pública de demostració, sense SLA; es pot substituir amb `VITE_ICE_SERVERS`. Cap relé TURN desa les respostes en una base de dades de l’aplicació; transporta el canal WebRTC xifrat.
+
+El panell mostra si l’última connexió s’ha establert directament o amb TURN. **P2P directe no està garantit en una xarxa que aïlli dispositius o bloquegi WebRTC**: en aquest cas cal que el tallafoc permeti senyalització WSS de PeerJS i TURN/TLS. Obrir només HTTP/HTTPS de navegació no implica necessàriament permetre TURN encara que usi el port 443.
+
+`node tests/turn.mjs` repeteix el flux entre navegadors forçant `iceTransportPolicy=relay`, de manera que una connexió directa no pot fer passar falsament aquesta prova.

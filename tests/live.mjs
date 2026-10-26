@@ -7,7 +7,7 @@ process.env.VITE_STATIC_MODE = 'true';
 process.env.VITE_PEER_HOST = '127.0.0.1';
 process.env.VITE_PEER_PORT = '19000';
 process.env.VITE_PEER_SECURE = 'false';
-process.env.VITE_ICE_SERVERS = '[]';
+if(process.env.CESC_TEST_TURN !== 'true')process.env.VITE_ICE_SERVERS = '[]';
 let signalling;
 PeerServer({ port: 19000, path: '/' }, server => { signalling = server; });
 const vite = await createServer({ server: { port: 15173, host: '127.0.0.1' } });

@@ -28,6 +28,8 @@ jobs:
       - run: node tests/protocol.mjs
       - run: npm run test:live
         timeout-minutes: 4
+      - run: node tests/turn.mjs
+        timeout-minutes: 4
       - run: npm run build
         env:
           VITE_STATIC_MODE: 'true'

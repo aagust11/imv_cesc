@@ -188,6 +188,7 @@ export default function App() {
   // --- STUDENT WORKFLOW STATES ---
   const [adminSessionCode, setAdminSessionCode] = useState("");
   const [isOpeningSession, setIsOpeningSession] = useState(false);
+  const [peerRoute, setPeerRoute] = useState("");
   const [liveStatus, setLiveStatus] = useState("Sessió tancada");
   const pendingResponseRef = useRef<any>(null);
   const sendingResponseRef = useRef(false);
@@ -309,6 +310,12 @@ export default function App() {
     const timer = setInterval(() => void heartbeat(), 15000);
     return () => clearInterval(timer);
   }, [currentView, studentStep, joinedSessionData, selectedSelfName, studentSessionId]);
+
+  useEffect(()=>{
+    const update=(event:Event)=>setPeerRoute((event as CustomEvent).detail.text);
+    window.addEventListener("cesc-peer-route",update);
+    return()=>window.removeEventListener("cesc-peer-route",update);
+  },[]);
 
   // Privacy 10-second mask countdown effect
   useEffect(() => {
@@ -1927,6 +1934,7 @@ export default function App() {
                 </div>
 
                 <p role="status" className="text-xs text-amber-200">{liveStatus}</p>
+                {peerRoute && <p className="text-xs text-slate-300">Última connexió: {peerRoute}</p>}
                 {activeSession ? (
                   <div className="space-y-4 py-3 border-y-2 border-slate-800">
                     <div className="text-center bg-slate-800 p-4 border-2 border-slate-700">
