@@ -7,15 +7,15 @@ https://aagust11.github.io/imv_cesc/
 1. A l’ordinador docent, entra a administració, prepara el qüestionari i tria un codi de 6 lletres/números (o deixa’l buit).
 2. Prem **Obre a respostes d’alumnes**. Espera que indiqui **Connectat · rebent respostes**. Si el codi ja està ocupat o no hi ha connexió, no s’obre la sessió.
 3. Mantén la consola oberta i el dispositiu despert. Cada alumne obre la mateixa web des del seu dispositiu, tria el portal d’alumnes i introdueix el codi.
-4. Cada resposta s’envia amb WebRTC al navegador docent. El receptor valida i desa les dades abans de confirmar la recepció. El recompte i el sociograma s’actualitzen immediatament. Les respostes d’altres alumnes no es comparteixen amb els participants.
+4. Cada resposta s’envia xifrada pel relé segur al navegador docent. El receptor valida i desa les dades abans de confirmar la recepció. El recompte i el sociograma s’actualitzen immediatament. Les respostes d’altres alumnes no es comparteixen amb els participants.
 5. Els enviaments pendents es reintenten cada 5 segons i es conserven a sessionStorage mentre la pestanya existeixi. La pantalla final només confirma l’enviament quan administració l’ha rebut. No tanqueu una pàgina amb enviaments pendents.
 6. Exporta JSON/CSV des d’administració. Les dades es desen al navegador docent, no a GitHub. Si recarregues la consola, es recupera la sessió desada i s’intenta recuperar la connexió. Tancar la sessió o sortir d’administració atura la recepció.
 
 ## Connexió i límits
 
-PeerJS Cloud proporciona la senyalització inicial (Internet necessari). Les respostes viatgen pel canal WebRTC entre navegadors. No hi ha servidor Node.js local per configurar. El codi és una clau d’accés al qüestionari, no verifica la identitat de l’alumne; qualsevol persona que el conegui pot accedir a la llista del grup. La contrasenya local del docent tampoc constitueix autenticació de servidor. No compartiu els codis públicament.
+Per defecte els navegadors es connecten al relé de Supabase per WebSocket segur (TLS 443). No hi ha servidor Node.js local per configurar ni connexió WebRTC directa obligatòria. El codi del grup és una clau d’accés al qüestionari, no verifica la identitat real de l’alumne. La contrasenya local del docent tampoc constitueix autenticació institucional. No compartiu els codis públicament.
 
-Algunes xarxes de centre o NAT poden bloquejar WebRTC. No es pot garantir connexió en totes les xarxes sense un servei TURN accessible. El codi permet configurar un servidor de senyalització propi i ICE/TURN amb variables Vite (vegeu `.env.example`). No inclogueu credencials TURN permanents al frontend; utilitzeu credencials temporals. Per defecte s’utilitza la infraestructura pública de PeerJS.
+Les xarxes han de permetre el domini del relé i WebSocket segur. Més avall es descriuen el transport i les proves. WebRTC/PeerJS queda disponible només com a opció explícita per a entorns que el necessitin.
 
 ## Desenvolupament i desplegament
 
@@ -56,3 +56,17 @@ La taula mostra preguntes amb almenys una selecció, última resposta rebuda i �
 Mentre el qüestionari està obert, els alumnes, preguntes, títol, mode d’accés, prefix i codis queden congelats. L’edició està desactivada i també es rebutgen els intents d’importar damunt del qüestionari actiu. El seguiment i els reinicis individuals continuen disponibles. Tanqueu la sessió per editar-la.
 
 L’última pregunta porta a un resum de totes les preguntes amb el nombre de seleccions i l’avís **En blanc**. Es pot tornar a una pregunta per revisar-la. Només **Confirma i envia definitivament** marca el qüestionari com a acabat, després de la confirmació de recepció del docent.
+
+## Connexió per xarxes de centre (relé segur)
+
+El transport predeterminat és ara **Supabase Realtime Broadcast per WSS/TLS 443**, amb connexió de sortida al servidor. No necessita UDP, descobrir IP locals ni obrir una connexió WebRTC entre alumnes i docent. S’ha contrastat el model amb el client públic de Saladroom, que utilitza un servidor intermedi i WebSocket segur; el seu GitHub públic només conté ajuda i textos legals.
+
+S’utilitza el servei Realtime del projecte Supabase existent amb canals separats `imv-cesc-relay-v2-<codi>`. No s’escriuen les respostes en taules, fitxers o registres d’aplicació del servidor. El relé distribueix paquets efímers xifrats amb ECDH P-256 i AES-GCM. El navegador docent continua validant i desant les respostes, i només el seu ACK xifrat fa aparèixer l’estat d’enviament correcte. Un ACK del servidor de missatgeria no compta com a recepció del docent.
+
+Els canals de transport són públics amb noms de sala; els paquets de resposta i d’accés viatgen xifrats i no es transmeten claus privilegiades de Supabase. El control d’alumnes, codis individuals i reinicis continua al dispositiu docent. Aquest sistema no substitueix una autenticació institucional del professorat. No hi ha garantia sobre qualsevol xarxa: si un filtre bloqueja el domini Supabase o WebSocket segur també cal autoritzar-ne la sortida.
+
+Per al tallafoc/proxy: permetre HTTPS i WSS a `ohlkjphpzxnuyjbcszcn.supabase.co`, port 443. No cal permetre trànsit entrant entre els dispositius. Els dos extrems han de recarregar la web després de l’actualització i la consola ha de romandre oberta.
+
+`VITE_TRANSPORT=webrtc` conserva el transport anterior com a opció explícita; no s’activa automàticament si el relé falla. Es poden configurar un altre projecte i clau publicable amb `VITE_RELAY_URL` i `VITE_RELAY_PUBLISHABLE_KEY`.
+
+Proves: `npm run test:relay` executa el flux complet amb WebRTC prohibit i comprova que el trànsit no conté noms en clar. `npm run test:relay:cloud` comprova un enviament sintètic entre dos navegadors a través del servei real, sense dades d’alumnat real.

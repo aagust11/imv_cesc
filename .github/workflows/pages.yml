@@ -28,6 +28,10 @@ jobs:
       - run: node tests/protocol.mjs
       - run: npm run test:live
         timeout-minutes: 4
+      - run: npm run test:relay
+        timeout-minutes: 4
+      - run: npm run test:relay:cloud
+        timeout-minutes: 2
       - run: npm run build
         env:
           VITE_STATIC_MODE: 'true'

@@ -1285,7 +1285,7 @@ export default function App() {
       {/* MAIN VIEW CONTROLLER GRID */}
       {isLocalMode && (
         <div role="status" className="bg-amber-100 border-b-2 border-slate-900 p-3 text-sm text-center">
-          Connexió directa entre dispositius. Mantén la consola d’administració oberta per rebre respostes.
+          Relé segur per Internet (port 443). Mantén la consola d’administració oberta per rebre respostes.
           Les dades es desen al navegador d’administració: exporta còpies JSON.
         </div>
       )}
@@ -1382,7 +1382,7 @@ export default function App() {
             <div className="flex flex-wrap items-center justify-center gap-6 sm:gap-10 pt-4 text-xs font-black uppercase tracking-wider text-slate-500 text-center">
               <span className="flex items-center gap-1.5 bg-indigo-50 border-2 border-slate-900 px-3 py-1.5 shadow-[2px_2px_0px_rgba(0,0,0,1)]">
                 <ShieldCheck className="w-4.5 h-4.5 text-indigo-600" />
-                Respostes enviades directament a administració
+                Respostes xifrades enviades a administració
               </span>
               <span className="flex items-center gap-1.5 bg-rose-50 border-2 border-slate-900 px-3 py-1.5 shadow-[2px_2px_0px_rgba(0,0,0,1)]">
                 <HeartPulse className="w-4.5 h-4.5 text-rose-500" />

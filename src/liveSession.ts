@@ -1,3 +1,4 @@
+import { startRelayHosting, stopRelayHosting, sendViaRelay } from "./relayTransport";
 import { claimStudent } from "./studentAccess";
 import Peer, { type DataConnection } from 'peerjs';
 import type { ActiveSession, CESCProject, StudentResponse } from './types';
@@ -22,7 +23,7 @@ let hostCode = '';
 let hostGeneration = 0;
 const notify = (message: string) => window.dispatchEvent(new CustomEvent('cesc-live-status', { detail: message }));
 export const readLiveSession = (): ActiveSession | null => JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
-export function stopHosting() {
+function stopPeerHosting() {
   hostGeneration++;
   host?.destroy(); host = null; opening = null; hostCode = '';
   notify('Sessió tancada');
@@ -97,7 +98,7 @@ export function processStudentRequest(message: any) {
   return { success: true };
 }
 
-export function startHosting(code: string): Promise<void> {
+function startPeerHosting(code: string): Promise<void> {
   if (!SESSION_CODE_PATTERN.test(code)) return Promise.reject(new Error('Codi no vàlid.'));
   if (hostCode === code && host && !host.destroyed) {
     if (opening) return opening;
@@ -105,7 +106,7 @@ export function startHosting(code: string): Promise<void> {
     if (host.disconnected) host.reconnect();
     return Promise.reject(new Error('Reconnectant amb el servei de connexió…'));
   }
-  stopHosting(); hostCode = code;
+  stopPeerHosting(); hostCode = code;
   const generation = hostGeneration;
   const peer = new Peer(peerId(code), options()); host = peer;
   notify('Connectant…');
@@ -140,7 +141,7 @@ export function startHosting(code: string): Promise<void> {
 }
 
 // One short-lived connection per request avoids keeping a full class of idle peers connected.
-export function sendToAdmin(code: string, payload: object): Promise<any> {
+function sendToPeerAdmin(code: string, payload: object): Promise<any> {
   return new Promise((resolve, reject) => {
     const peer = new Peer(options());
     let connection: DataConnection | undefined;
@@ -165,3 +166,9 @@ export function sendToAdmin(code: string, payload: object): Promise<any> {
     });
   });
 }
+
+// Relay is the production default. WebRTC remains an explicit optional transport.
+const usePeer = import.meta.env.VITE_TRANSPORT === 'webrtc';
+export const startHosting = (code:string) => usePeer ? startPeerHosting(code) : startRelayHosting(code,processStudentRequest);
+export const sendToAdmin = (code:string,payload:object) => usePeer ? sendToPeerAdmin(code,payload) : sendViaRelay(code,payload);
+export function stopHosting(){stopPeerHosting();stopRelayHosting();}
