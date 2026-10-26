@@ -1,24 +1,11 @@
-import { peerOptions, reportPeerRoute } from "./peerNetwork";
-import { claimStudent } from "./studentAccess";
-import Peer, { type DataConnection } from 'peerjs';
+import { claimStudent } from './studentAccess';
 import type { ActiveSession, CESCProject, StudentResponse } from './types';
 import { SESSION_CODE_PATTERN } from './sessionCode';
-
-const SESSION_KEY = 'cesc_active_session_local';
-const PROJECTS_KEY = 'cesc_projects_local';
-const peerId = (code: string) => `imv-cesc-v1-${code}`;
-let host: Peer | null = null;
-let opening: Promise<void> | null = null;
-let hostCode = '';
-let hostGeneration = 0;
-const notify = (message: string) => window.dispatchEvent(new CustomEvent('cesc-live-status', { detail: message }));
-export const readLiveSession = (): ActiveSession | null => JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
-export function stopHosting() {
-  hostGeneration++;
-  host?.destroy(); host = null; opening = null; hostCode = '';
-  notify('Sessió tancada');
-}
-
+import { createKeys, sharedKey, seal, unseal } from './mailboxCrypto';
+const SESSION_KEY='cesc_active_session_local';
+const PROJECTS_KEY='cesc_projects_local';
+const notify=(message:string)=>window.dispatchEvent(new CustomEvent('cesc-live-status',{detail:message}));
+export const readLiveSession=():ActiveSession|null=>JSON.parse(localStorage.getItem(SESSION_KEY)||'null');
 // Deliberately expose only a student-safe view and write-only answer submission.
 export function processStudentRequest(message: any) {
   const session = readLiveSession();
@@ -88,119 +75,111 @@ export function processStudentRequest(message: any) {
   return { success: true };
 }
 
-export async function startHosting(code: string): Promise<void> {
-  if (!SESSION_CODE_PATTERN.test(code)) return Promise.reject(new Error('Codi no vàlid.'));
-  if (hostCode === code && host && !host.destroyed) {
-    if (opening) return opening;
-    if (host.open) return Promise.resolve();
-    if (host.disconnected) host.reconnect();
-    return Promise.reject(new Error('Reconnectant amb el servei de connexió…'));
-  }
-  stopHosting(); hostCode = code;
-  const generation = hostGeneration;
-  const configuration=await peerOptions();
-  if(generation!==hostGeneration)throw new Error("Obertura cancel·lada.");
-  const peer = new Peer(peerId(code), configuration); host = peer;
-  notify('Connectant…');
-  const ready = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => { peer.destroy(); reject(new Error('No es pot obrir la connexió. Comprova Internet i la xarxa.')); }, 20000);
-    peer.on('open', () => { clearTimeout(timer); notify('Connectat · rebent respostes'); resolve(); });
-    peer.on('error', (error) => {
-      const text = error.type === 'unavailable-id' ? 'Aquest codi ja està en ús en una altra administració. Tria’n un altre.' : 'Error de connexió. Comprova Internet i torna-ho a provar.';
-      notify(text); clearTimeout(timer); reject(new Error(text));
-    });
-    peer.on('disconnected', () => {
-      notify('Connexió interrompuda · reconnectant');
-      setTimeout(() => { if (generation === hostGeneration && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 2000);
-    });
-    peer.on('connection', (connection: DataConnection) => {
-      connection.on('error', () => {});
-      connection.on('open',()=>void reportPeerRoute(connection));
-      connection.on('data', (raw: any) => {
-        if (!raw || typeof raw.id !== 'string') return;
-        try {
-          if (JSON.stringify(raw).length > 100000) throw new Error('Enviament massa gran.');
-          const data = processStudentRequest(raw);
-          connection.send({ id: raw.id, ok: true, data });
-        } catch (error) {
-          connection.send({ id: raw.id, ok: false, error: error instanceof Error ? error.message : 'No s’ha pogut desar.' });
-        }
-      });
-    });
-  });
-  opening = ready;
-  void ready.finally(() => { if (generation === hostGeneration) opening = null; }).catch(() => {});
-  return ready;
-}
 
-// Keep the data channel alive across answers/heartbeats; renegotiate only after a real disconnect.
-type Pending={resolve:(value:any)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
-type ClientLink={connection:DataConnection;ready:Promise<DataConnection>;rejectOpen:(error:Error)=>void;pending:Map<string,Pending>};
-let studentPeer:Peer|null=null;
-let studentPeerReady:Promise<Peer>|null=null;
-const clientLinks=new Map<string,ClientLink>();
-function failLink(code:string,error:Error){
-  const link=clientLinks.get(code);if(!link)return;
-  clientLinks.delete(code);link.rejectOpen(error);
-  for(const pending of link.pending.values()){clearTimeout(pending.timer);pending.reject(error);}
-  link.pending.clear();link.connection.close();
+// Both browsers contact this service with ordinary HTTPS; no WebRTC or WebSocket.
+const RELAY = (import.meta.env.VITE_RELAY_URL || 'https://cesc-https-relay.wittygrove17.chatgpt.site').replace(/\/$/,'');
+export async function relayRequest(path:string,method='GET',body?:unknown,token?:string) {
+  const response=await fetch(`${RELAY}${path}`,{method,headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),...(token?{Authorization:`Bearer ${token}`}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(12000)});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error || 'El servei HTTPS no està disponible.');
+  return data;
 }
-async function getStudentPeer():Promise<Peer>{
-  if(studentPeerReady&&(!studentPeer||!studentPeer.destroyed))return studentPeerReady;
-  studentPeerReady=(async()=>{
-    const peer=new Peer(await peerOptions());studentPeer=peer;
-    return new Promise<Peer>((resolve,reject)=>{
-      const timer=setTimeout(()=>{peer.destroy();reject(new Error('No es pot contactar amb la senyalització WebRTC.'));},20000);
-      peer.on('open',()=>{clearTimeout(timer);resolve(peer);});
-      peer.on('error',error=>{
-        clearTimeout(timer);reject(error);
-        for(const code of [...clientLinks.keys()])failLink(code,new Error('No es pot connectar amb administració. Comprova el codi i la consola oberta.'));
-        if(peer.destroyed){studentPeer=null;studentPeerReady=null;}
-      });
-      peer.on('disconnected',()=>{if(!peer.destroyed)setTimeout(()=>{if(peer.disconnected&&!peer.destroyed)peer.reconnect();},1000);});
-      peer.on('close',()=>{
-        if(studentPeer===peer){studentPeer=null;studentPeerReady=null;}
-        for(const code of [...clientLinks.keys()])failLink(code,new Error('Connexió interrompuda. Es tornarà a intentar.'));
-      });
-    });
+export async function diagnoseHttps(){await relayRequest('/health');return 'HTTPS respon. La recepció es confirma quan entra un alumne.';}
+type Host={code:string;owner:string;keys:CryptoKeyPair;publicKey:JsonWebKey;stopped:boolean;timer?:ReturnType<typeof setTimeout>;replies:Map<string,unknown>};
+let host:Host|null=null;
+let opening:Promise<void>|null=null;
+let generation=0;
+const delay=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+export function stopHosting(closeRoom=false){
+  generation++;
+  const old=host;host=null;opening=null;
+  if(old){old.stopped=true;clearTimeout(old.timer);if(closeRoom)void relayRequest(`/v1/rooms/${old.code}`,'DELETE',undefined,old.owner).catch(()=>{});}
+  notify('Sessió tancada');
+}
+async function hostIdentity(code:string){
+  const storageKey=`cesc_https_host_${code}`;
+  const raw=sessionStorage.getItem(storageKey);
+  if(raw){
+    const saved=JSON.parse(raw);
+    const privateKey=await crypto.subtle.importKey('jwk',saved.privateKey,{name:'ECDH',namedCurve:'P-256'},true,['deriveKey']);
+    const publicKey=await crypto.subtle.importKey('jwk',saved.publicKey,{name:'ECDH',namedCurve:'P-256'},true,[]);
+    return {owner:saved.owner,publicKey:saved.publicKey,keys:{privateKey,publicKey}};
+  }
+  const keys=await createKeys();
+  const publicKey=await crypto.subtle.exportKey('jwk',keys.publicKey);
+  const owner=crypto.randomUUID();
+  sessionStorage.setItem(storageKey,JSON.stringify({owner,publicKey,privateKey:await crypto.subtle.exportKey('jwk',keys.privateKey)}));
+  return {owner,publicKey,keys};
+}
+export async function startHosting(code:string):Promise<void>{
+  if(!SESSION_CODE_PATTERN.test(code))throw new Error('Codi no vàlid.');
+  if(host?.code===code&&!host.stopped)return opening || Promise.resolve();
+  stopHosting();
+  const current=generation;
+  const task=(async()=>{
+    const identity=await hostIdentity(code);
+    if(current!==generation)throw new Error('Obertura cancel·lada.');
+    const active:Host={code,...identity,stopped:false,replies:new Map()};host=active;
+    notify('Connectant per HTTPS…');
+    await relayRequest(`/v1/rooms/${code}`,'PUT',{publicKey:active.publicKey},active.owner);
+    if(current!==generation)return;
+    notify('Connectat · rebent respostes');
+    const poll=async()=>{
+      if(active.stopped)return;
+      try{
+        const result=await relayRequest(`/v1/rooms/${code}/poll`,'POST',{},active.owner);
+        if(active.stopped)return;
+        for(const message of result.messages){
+          if(active.stopped)break;
+          let packet=active.replies.get(message.id);
+          if(!packet){
+            try{
+              const key=await sharedKey(active.keys.privateKey,message.packet.publicKey);
+              const raw=await unseal(key,message.packet,`${code}:${message.id}:request`);
+              let reply;
+              try{reply={ok:true,data:processStudentRequest({...raw,code})};}
+              catch(error){reply={ok:false,error:error instanceof Error?error.message:'No s’ha pogut desar.'};}
+              packet=await seal(key,reply,`${code}:${message.id}:reply`);
+            }catch{
+              // An invalid packet cannot block all other students in the queue.
+              packet={iv:'invalid',data:'invalid'};
+            }
+            active.replies.set(message.id,packet);
+            if(active.replies.size>1000)active.replies.delete(active.replies.keys().next().value!);
+          }
+          await relayRequest(`/v1/rooms/${code}/reply`,'POST',{id:message.id,packet},active.owner);
+        }
+        notify('Connectat · rebent respostes');
+      }catch{
+        if(!active.stopped){
+          notify('Sense comunicació HTTPS · reintentant');
+          // A backgrounded browser can outlive the mailbox lease. Reopen with the same identity.
+          try{await relayRequest(`/v1/rooms/${code}`,'PUT',{publicKey:active.publicKey},active.owner);}catch{}
+        }
+      }finally{if(!active.stopped)active.timer=setTimeout(()=>void poll(),1000);}
+    };
+    active.timer=setTimeout(()=>void poll(),0);
   })();
-  return studentPeerReady;
-}
-async function connectionToAdmin(code:string):Promise<DataConnection>{
-  const existing=clientLinks.get(code);if(existing)return existing.ready;
-  const peer=await getStudentPeer();
-  // Another answer may have finished opening the same link while the peer was joining.
-  const raced=clientLinks.get(code);if(raced)return raced.ready;
-  const connection=peer.connect(peerId(code),{reliable:true,serialization:'json'});
-  const link:ClientLink={connection,pending:new Map(),ready:Promise.resolve(connection),rejectOpen:()=>{}};
-  clientLinks.set(code,link);
-  link.ready=new Promise<DataConnection>((resolve,reject)=>{
-    link.rejectOpen=reject;
-    const timer=setTimeout(()=>failLink(code,new Error('La xarxa no permet completar WebRTC. Pot caldre un relé TURN accessible per TCP/TLS 443.')),25000);
-    connection.on('open',()=>{clearTimeout(timer);void reportPeerRoute(connection);resolve(connection);});
-    connection.on('error',()=>{clearTimeout(timer);failLink(code,new Error('Ha fallat la connexió entre els dispositius.'));});
-    connection.on('close',()=>{clearTimeout(timer);failLink(code,new Error('Administració ha tancat la connexió.'));});
-    connection.on('data',(reply:any)=>{
-      const pending=link.pending.get(reply?.id);if(!pending)return;
-      clearTimeout(pending.timer);link.pending.delete(reply.id);
-      reply.ok?pending.resolve(reply.data):pending.reject(new Error(reply.error));
-    });
-  });
-  return link.ready;
+  opening=task;
+  try{await task;}catch(error){if(current===generation){host=null;notify(error instanceof Error?error.message:'Error HTTPS.');}throw error;}
+  finally{if(current===generation)opening=null;}
 }
 export async function sendToAdmin(code:string,payload:object):Promise<any>{
-  const connection=await connectionToAdmin(code);
-  const link=clientLinks.get(code);
-  if(!link||!connection.open)throw new Error('Connexió interrompuda. Es tornarà a intentar.');
-  return new Promise((resolve,reject)=>{
-    const id=crypto.randomUUID();
-    const timer=setTimeout(()=>{
-      link.pending.delete(id);
-      reject(new Error('Administració no ha confirmat la recepció. Mantén la pàgina oberta.'));
-      failLink(code,new Error('La connexió ha caducat. Es tornarà a obrir.'));
-    },20000);
-    link.pending.set(id,{resolve,reject,timer});
-    try{connection.send({...payload,code,id});}
-    catch{clearTimeout(timer);link.pending.delete(id);reject(new Error('No s’ha pogut enviar. Es tornarà a intentar.'));failLink(code,new Error('Connexió interrompuda.'));}
-  });
+  if(!SESSION_CODE_PATTERN.test(code))throw new Error('Codi no vàlid.');
+  const room=await relayRequest(`/v1/rooms/${code}`);
+  const keys=await createKeys();
+  const key=await sharedKey(keys.privateKey,room.publicKey);
+  const id=crypto.randomUUID(),secret=crypto.randomUUID();
+  const packet={...await seal(key,payload,`${code}:${id}:request`),publicKey:await crypto.subtle.exportKey('jwk',keys.publicKey)};
+  await relayRequest(`/v1/rooms/${code}/requests`,'POST',{id,secret,packet});
+  const deadline=Date.now()+45000;
+  while(Date.now()<deadline){
+    await delay(1000);
+    const result=await relayRequest(`/v1/rooms/${code}/requests/${id}`,'GET',undefined,secret);
+    if(result.pending)continue;
+    const reply=await unseal(key,result.packet,`${code}:${id}:reply`);
+    if(!reply.ok)throw new Error(reply.error);
+    return reply.data;
+  }
+  throw new Error('Administració no ha confirmat la recepció. Mantén la pàgina oberta; es tornarà a intentar.');
 }

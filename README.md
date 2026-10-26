@@ -7,15 +7,21 @@ https://aagust11.github.io/imv_cesc/
 1. A l’ordinador docent, entra a administració, prepara el qüestionari i tria un codi de 6 lletres/números (o deixa’l buit).
 2. Prem **Obre a respostes d’alumnes**. Espera que indiqui **Connectat · rebent respostes**. Si el codi ja està ocupat o no hi ha connexió, no s’obre la sessió.
 3. Mantén la consola oberta i el dispositiu despert. Cada alumne obre la mateixa web des del seu dispositiu, tria el portal d’alumnes i introdueix el codi.
-4. Cada resposta s’envia amb WebRTC al navegador docent. El receptor valida i desa les dades abans de confirmar la recepció. El recompte i el sociograma s’actualitzen immediatament. Les respostes d’altres alumnes no es comparteixen amb els participants.
+4. Cada resposta s’envia per HTTPS a una bústia temporal xifrada; la consola docent la consulta cada segon. El receptor valida i desa les dades abans de confirmar la recepció. El recompte i el sociograma s’actualitzen després de rebre la resposta. Les respostes d’altres alumnes no es comparteixen amb els participants.
 5. Els enviaments pendents es reintenten cada 5 segons i es conserven a sessionStorage mentre la pestanya existeixi. La pantalla final només confirma l’enviament quan administració l’ha rebut. No tanqueu una pàgina amb enviaments pendents.
 6. Exporta JSON/CSV des d’administració. Les dades es desen al navegador docent, no a GitHub. Si recarregues la consola, es recupera la sessió desada i s’intenta recuperar la connexió. Tancar la sessió o sortir d’administració atura la recepció.
 
 ## Connexió i límits
 
-PeerJS Cloud proporciona la senyalització inicial (Internet necessari). Les respostes viatgen pel canal WebRTC entre navegadors. No hi ha servidor Node.js local per configurar. El codi és una clau d’accés al qüestionari, no verifica la identitat de l’alumne; qualsevol persona que el conegui pot accedir a la llista del grup. La contrasenya local del docent tampoc constitueix autenticació de servidor. No compartiu els codis públicament.
+La web continua a GitHub Pages. El servei `https://cesc-https-relay.wittygrove17.chatgpt.site` executa un relé HTTPS a Cloudflare Workers (allotjat amb Sites), amb una bústia D1 de missatges xifrats. No s’utilitzen WebRTC, WebSockets, PeerJS ni Supabase.
 
-Algunes xarxes de centre o NAT poden bloquejar WebRTC. No es pot garantir connexió en totes les xarxes sense un servei TURN accessible. El codi permet configurar un servidor de senyalització propi i ICE/TURN amb variables Vite (vegeu `.env.example`). No inclogueu credencials TURN permanents al frontend; utilitzeu credencials temporals. Per defecte s’utilitza la infraestructura pública de PeerJS.
+Cada petició es xifra al navegador amb ECDH P-256 + AES-GCM, incloent nom, respostes i tokens. El servidor només veu el codi del grup, claus públiques, identificadors aleatoris i contingut xifrat. El docent valida i desa al seu navegador abans de retornar el justificant xifrat. El servidor és un intermediari de confiança per descobrir la clau pública; això no és una verificació independent de la identitat del docent.
+
+La bústia caduca les peticions als 5 minuts i elimina els registres caducats amb les peticions següents. La sala necessita un senyal de la consola cada 90 segons. Tancar-la elimina la sala i els seus missatges. La còpia definitiva de les respostes continua al navegador docent: exporteu-la abans d’esborrar dades del navegador.
+
+L’administració de la sala usa un secret independent del codi de grup; els justificants requereixen un secret aleatori per petició. El codi compartit permet veure la llista del grup, però no les respostes dels altres alumnes. La contrasenya local del docent no és autenticació de servidor. El mode compartit no verifica la identitat real; utilitzeu codis individuals per evitar la selecció d’un altre nom.
+
+L’aïllament entre dispositius de la Wi-Fi deixa de ser rellevant perquè tots contacten amb un servidor per HTTPS. Cal que el filtre del centre permeti el domini del relé. El botó **Comprova la connexió HTTPS** comprova aquest accés des del dispositiu; encara cal provar el flux complet a `gencat_ens_edu`.
 
 ## Desenvolupament i desplegament
 
@@ -31,7 +37,7 @@ El workflow de Pages compila amb `VITE_STATIC_MODE=true` i publica `dist/` despr
 
 ## Proves de connexió
 
-`npm run test:live` inicia un servidor de senyalització de prova i Vite i comprova la comunicació WebRTC entre contextos de navegador separats. Cal instal·lar Chromium amb `npx playwright install chromium` la primera vegada. El servidor de prova no forma part del desplegament a Pages.
+`npm run test:live` inicia la bústia de prova amb el mateix codi Worker i SQL (SQLite local), i comprova la comunicació HTTPS entre contextos de navegador separats amb WebRTC i WebSockets bloquejats. Cal instal·lar Chromium amb `npx playwright install chromium` la primera vegada. El servidor de prova no forma part del desplegament a Pages.
 
 ## Participació individual
 
@@ -57,20 +63,8 @@ Mentre el qüestionari està obert, els alumnes, preguntes, títol, mode d’acc
 
 L’última pregunta porta a un resum de totes les preguntes amb el nombre de seleccions i l’avís **En blanc**. Es pot tornar a una pregunta per revisar-la. Només **Confirma i envia definitivament** marca el qüestionari com a acabat, després de la confirmació de recepció del docent.
 
-## Connexió P2P en xarxes restrictives
+## Servei HTTPS
 
-L’aplicació no utilitza Supabase ni cap base de dades externa. Les respostes viatgen amb WebRTC i es desen al navegador d’administració. S’ha retirat completament la integració de relé de missatgeria amb Supabase.
+`relay/worker.js` conté el servei desplegat. `relay/schema.sql` en defineix les taules i índexs. `VITE_RELAY_URL` permet apuntar a una altra instal·lació compatible; `.env.example` en mostra el format. No cal configurar cap servidor local als dispositius del centre.
 
-Es manté una connexió de dades persistent per navegador i grup, en comptes de renegociar cada resposta i senyal de seguiment. Després d’un tall es torna a connectar i es reintenten les respostes pendents. Només la confirmació del docent indica que s’han desat.
-
-STUN prova connexions directes. Els relés públics de demostració provats no han proporcionat una ruta funcional i **no s’inclouen com a solució de xarxa**. Per a xarxes que impedeixen el trànsit directe cal configurar un servei TURN vàlid, preferiblement TURN/TLS al port 443, amb `VITE_ICE_SERVERS`.
-
-A GitHub → Settings → Secrets and variables → Actions → Variables, `CESC_ICE_SERVERS` pot contenir l’array JSON de servidors ICE amb credencials de curta durada. El workflow només executa la prova de relé forçat quan existeix aquesta configuració, i la incorpora a la compilació. Aquests valors arriben al navegador: no hi poseu una API key d’administració ni credencials permanents privilegiades. Per a producció recurrent cal un emissor de credencials temporals.
-
-La prova P2P directa completa passa, incloent 30 enviaments concurrents i el flux d’alumnes. Això **no acredita el funcionament a gencat_ens_edu**: encara requereix provar dos dispositius en aquella xarxa i, si no hi ha ruta directa, disposar d’un relé funcional.
-
-El panell mostra si l’última connexió s’ha establert directament o amb TURN. **P2P directe no està garantit en una xarxa que aïlli dispositius o bloquegi WebRTC**: en aquest cas cal que el tallafoc permeti senyalització WSS de PeerJS i TURN/TLS. Obrir només HTTP/HTTPS de navegació no implica necessàriament permetre TURN encara que usi el port 443.
-
-El botó **Comprova la xarxa P2P** prova l’obtenció de candidats STUN/TURN sense mostrar IP ni credencials. No substitueix una prova amb dos dispositius del centre.
-
-`node tests/turn.mjs` repeteix el flux entre navegadors forçant `iceTransportPolicy=relay`, de manera que una connexió directa no pot fer passar falsament aquesta prova.
+`node tests/mailbox.mjs` comprova autorització de la consola, col·lisions de codi, justificants privats, enviaments duplicats, caducitat i tancament. `npm run test:live` comprova el flux complet amb 30 alumnes concurrents, reconnexió, reintents i confirmació final.

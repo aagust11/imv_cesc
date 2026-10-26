@@ -1,4 +1,4 @@
-import { diagnoseIce } from "./peerNetwork";
+import { diagnoseHttps } from "./liveSession";
 import { ensureStudentCodes, configurationIsFrozen, answeredQuestions, studentCodeSheet } from "./questionnaireControls";
 import { resetStudent } from "./studentAccess";
 import { startHosting, stopHosting, sendToAdmin } from "./liveSession";
@@ -190,7 +190,6 @@ export default function App() {
   const [adminSessionCode, setAdminSessionCode] = useState("");
   const [isOpeningSession, setIsOpeningSession] = useState(false);
   const [networkTest, setNetworkTest] = useState("");
-  const [peerRoute, setPeerRoute] = useState("");
   const [liveStatus, setLiveStatus] = useState("Sessió tancada");
   const pendingResponseRef = useRef<any>(null);
   const sendingResponseRef = useRef(false);
@@ -312,12 +311,6 @@ export default function App() {
     const timer = setInterval(() => void heartbeat(), 15000);
     return () => clearInterval(timer);
   }, [currentView, studentStep, joinedSessionData, selectedSelfName, studentSessionId]);
-
-  useEffect(()=>{
-    const update=(event:Event)=>setPeerRoute((event as CustomEvent).detail.text);
-    window.addEventListener("cesc-peer-route",update);
-    return()=>window.removeEventListener("cesc-peer-route",update);
-  },[]);
 
   // Privacy 10-second mask countdown effect
   useEffect(() => {
@@ -822,7 +815,7 @@ export default function App() {
   };
 
   const handleCloseSessionOfAnswers = async () => {
-    stopHosting();
+    stopHosting(true);
     saveLocalActiveSession(null);
     setActiveSession(null);
 
@@ -1931,17 +1924,16 @@ export default function App() {
                   
                   <h3 className="text-xl font-black uppercase italic tracking-wide">Control de l'Aula</h3>
                   <p className="text-xs text-slate-400 leading-relaxed font-sans font-semibold">
-                    Obre el qüestionari amb un codi de 6 lletres o números i mantén aquesta consola oberta per rebre les respostes dels altres dispositius.
+                    Obre el qüestionari amb un codi de 6 lletres o números i mantén aquesta consola oberta per rebre les respostes dels altres dispositius per HTTPS. Les peticions es consulten cada segon.
                   </p>
                 </div>
 
                 <p role="status" className="text-xs text-amber-200">{liveStatus}</p>
-                {peerRoute && <p className="text-xs text-slate-300">Última connexió: {peerRoute}</p>}
                 <button className="bg-slate-700 text-white border border-slate-400 px-3 py-2 text-xs font-bold" disabled={networkTest === "Comprovant…"} onClick={async()=>{
                   setNetworkTest("Comprovant…");
-                  try { const result=await diagnoseIce();setNetworkTest(`STUN: ${result.stun ? "respon" : "sense resposta"}. TURN: ${!result.hasTurn ? "no configurat" : result.turn ? "respon" : "sense resposta"}. La connexió real es confirma quan entra un alumne.`); }
+                  try { setNetworkTest(await diagnoseHttps()); }
                   catch{setNetworkTest("No s’ha pogut completar la prova de xarxa.");}
-                }}>Comprova la xarxa P2P</button>
+                }}>Comprova la connexió HTTPS</button>
                 {networkTest && <p role="status" className="text-xs text-amber-200">{networkTest}</p>}
 
                 {activeSession ? (

@@ -1,25 +1,25 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
-import { PeerServer } from 'peer';
-import { createServer } from 'vite';
-process.env.VITE_STATIC_MODE = 'true';
-process.env.VITE_PEER_HOST = '127.0.0.1';
-process.env.VITE_PEER_PORT = '19000';
-process.env.VITE_PEER_SECURE = 'false';
-if(process.env.CESC_TEST_TURN !== 'true')process.env.VITE_ICE_SERVERS = '[]';
-let signalling;
-PeerServer({ port: 19000, path: '/' }, server => { signalling = server; });
-const vite = await createServer({ server: { port: 15173, host: '127.0.0.1' } });
+import {startMailbox} from './mailbox-server.mjs';
+import {createServer} from 'vite';
+process.env.VITE_STATIC_MODE='true';
+process.env.VITE_RELAY_URL='http://127.0.0.1:19000';
+const signalling=await startMailbox();
+const vite = await createServer({ server: { port: 15173, host: '127.0.0.1', hmr: false } });
 await vite.listen();
-const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-features=WebRtcHideLocalIpsWithMdns', '--allow-loopback-in-peer-connection'] });
+const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
 const errors = [];
 try {
+  // Fail immediately if transport accidentally regresses to WebRTC or WebSockets.
   const admin = await (await browser.newContext()).newPage();
   const studentContext = await browser.newContext();
   const student = await studentContext.newPage();
   const other = await (await browser.newContext()).newPage();
-  for (const page of [admin, student, other]) page.on('pageerror', e => errors.push(e.message));
+  for (const page of [admin, student, other]) {
+    page.on('pageerror',e=>errors.push(e.message));
+    await page.addInitScript(()=>{window.RTCPeerConnection=class{constructor(){throw Error('WebRTC forbidden')}};window.WebSocket=class{constructor(){throw Error('WebSocket forbidden')}}});
+  }
   await admin.goto('http://127.0.0.1:15173');
   await admin.evaluate(() => {
     localStorage.setItem('cesc_admin_token', 'session-verified-token-insmollet');
@@ -98,6 +98,14 @@ try {
   await admin.getByRole('button',{name:'Accés Administració',exact:true}).click();
   await admin.getByText('Connectat · rebent respostes',{exact:true}).waitFor({timeout:30000});
   await rpc(other,payloadB);
+  await admin.context().setOffline(true);
+  let received=false;
+  const queued=rpc(other,payloadB).then(()=>{received=true;});
+  await new Promise(resolve=>setTimeout(resolve,2500));
+  assert.equal(received,false,'Mailbox enqueue must never count as teacher receipt');
+  await admin.context().setOffline(false);
+  await queued;
+  console.log('PASS: teacher offline queues delivery without false receipt; reconnect acknowledges');
   await Promise.all(Array.from({length:30},async(_,i)=>{
     const deviceId=`parallel-device-${i}`;
     const studentName=`Company ${i}`;
@@ -158,5 +166,5 @@ try {
   await admin.getByRole('button',{name:'Tancar sessió de respostes',exact:true}).click();
   assert.deepEqual(errors,[]);
 } catch(error) { console.error('Browser errors:',errors); throw error; }
-finally { await browser.close(); await vite.close(); signalling?.close(); }
+finally { await browser.close(); await vite.close(); await signalling.close(); }
 process.exit(0);

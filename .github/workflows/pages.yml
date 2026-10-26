@@ -26,18 +26,15 @@ jobs:
       - run: npm run lint
       - run: npx playwright install --with-deps chromium --only-shell
       - run: node tests/protocol.mjs
+      - run: node tests/mailbox.mjs
+      - run: node tests/cloud-mailbox.mjs
+        timeout-minutes: 3
       - run: npm run test:live
-        timeout-minutes: 4
-      - name: Verify configured TURN relay
-        if: ${{ vars.CESC_ICE_SERVERS != '' }}
-        run: node tests/turn.mjs
-        env:
-          VITE_ICE_SERVERS: ${{ vars.CESC_ICE_SERVERS }}
         timeout-minutes: 4
       - run: npm run build
         env:
           VITE_STATIC_MODE: 'true'
-          VITE_ICE_SERVERS: ${{ vars.CESC_ICE_SERVERS }}
+          VITE_RELAY_URL: https://cesc-https-relay.wittygrove17.chatgpt.site
       - uses: actions/configure-pages@v5
         with:
           enablement: true
