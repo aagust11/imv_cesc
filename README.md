@@ -63,7 +63,11 @@ L’aplicació no utilitza Supabase ni cap base de dades externa. Les respostes 
 
 Es manté una connexió de dades persistent per navegador i grup, en comptes de renegociar cada resposta i senyal de seguiment. Després d’un tall es torna a connectar i es reintenten les respostes pendents. Només la confirmació del docent indica que s’han desat.
 
-ICE prova connexions directes amb STUN i TURN per UDP/TCP. S’utilitzen els servidors i les credencials públiques que inclou PeerJS; s’hi afegeixen alternatives TCP. Per a xarxes que només permetin TLS al port 443 cal configurar un servei TURN/TLS vàlid amb `VITE_ICE_SERVERS`. El servidor públic static-auth d’Open Relay es va descartar perquè la prova real no n’ha obtingut cap candidat de relé. No es presenta com una alternativa funcional.
+STUN prova connexions directes. Els relés públics de demostració provats no han proporcionat una ruta funcional i **no s’inclouen com a solució de xarxa**. Per a xarxes que impedeixen el trànsit directe cal configurar un servei TURN vàlid, preferiblement TURN/TLS al port 443, amb `VITE_ICE_SERVERS`.
+
+A GitHub → Settings → Secrets and variables → Actions → Variables, `CESC_ICE_SERVERS` pot contenir l’array JSON de servidors ICE amb credencials de curta durada. El workflow només executa la prova de relé forçat quan existeix aquesta configuració, i la incorpora a la compilació. Aquests valors arriben al navegador: no hi poseu una API key d’administració ni credencials permanents privilegiades. Per a producció recurrent cal un emissor de credencials temporals.
+
+La prova P2P directa completa passa, incloent 30 enviaments concurrents i el flux d’alumnes. Això **no acredita el funcionament a gencat_ens_edu**: encara requereix provar dos dispositius en aquella xarxa i, si no hi ha ruta directa, disposar d’un relé funcional.
 
 El panell mostra si l’última connexió s’ha establert directament o amb TURN. **P2P directe no està garantit en una xarxa que aïlli dispositius o bloquegi WebRTC**: en aquest cas cal que el tallafoc permeti senyalització WSS de PeerJS i TURN/TLS. Obrir només HTTP/HTTPS de navegació no implica necessàriament permetre TURN encara que usi el port 443.
 

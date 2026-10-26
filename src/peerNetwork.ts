@@ -1,12 +1,9 @@
 import type { PeerOptions, DataConnection } from 'peerjs';
 
-// Use the public servers and credentials shipped by PeerJS itself; add TCP alternatives.
-// No third-party account, private credentials, database or message broker is used.
+// Public STUN discovers direct routes. TURN must be supplied explicitly when required.
+// Public demo TURN hosts were tested and are not shipped as a working fallback.
 export async function defaultIceServers():Promise<RTCIceServer[]> {
-  return [
-    {urls:['stun:stun.l.google.com:19302','stun:stun.cloudflare.com:3478']},
-    {urls:['turn:eu-0.turn.peerjs.com:3478','turn:us-0.turn.peerjs.com:3478','turn:eu-0.turn.peerjs.com:3478?transport=tcp','turn:us-0.turn.peerjs.com:3478?transport=tcp'],username:'peerjs',credential:'peerjsp'},
-  ];
+  return [{urls:['stun:stun.l.google.com:19302','stun:stun.cloudflare.com:3478']}];
 }
 export async function peerOptions():Promise<PeerOptions> {
   const configured=import.meta.env.VITE_ICE_SERVERS;

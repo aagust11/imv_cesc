@@ -28,12 +28,16 @@ jobs:
       - run: node tests/protocol.mjs
       - run: npm run test:live
         timeout-minutes: 4
-      - run: node tests/ice-probe.mjs
-      - run: node tests/turn.mjs
+      - name: Verify configured TURN relay
+        if: ${{ vars.CESC_ICE_SERVERS != '' }}
+        run: node tests/turn.mjs
+        env:
+          VITE_ICE_SERVERS: ${{ vars.CESC_ICE_SERVERS }}
         timeout-minutes: 4
       - run: npm run build
         env:
           VITE_STATIC_MODE: 'true'
+          VITE_ICE_SERVERS: ${{ vars.CESC_ICE_SERVERS }}
       - uses: actions/configure-pages@v5
         with:
           enablement: true

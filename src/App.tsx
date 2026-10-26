@@ -1939,7 +1939,7 @@ export default function App() {
                 {peerRoute && <p className="text-xs text-slate-300">Última connexió: {peerRoute}</p>}
                 <button className="bg-slate-700 text-white border border-slate-400 px-3 py-2 text-xs font-bold" disabled={networkTest === "Comprovant…"} onClick={async()=>{
                   setNetworkTest("Comprovant…");
-                  try { const result=await diagnoseIce();setNetworkTest(`STUN: ${result.stun ? "respon" : "sense resposta"}. TURN: ${result.turn ? "respon" : "sense resposta"}. La connexió real es confirma quan entra un alumne.`); }
+                  try { const result=await diagnoseIce();setNetworkTest(`STUN: ${result.stun ? "respon" : "sense resposta"}. TURN: ${!result.hasTurn ? "no configurat" : result.turn ? "respon" : "sense resposta"}. La connexió real es confirma quan entra un alumne.`); }
                   catch{setNetworkTest("No s’ha pogut completar la prova de xarxa.");}
                 }}>Comprova la xarxa P2P</button>
                 {networkTest && <p role="status" className="text-xs text-amber-200">{networkTest}</p>}
