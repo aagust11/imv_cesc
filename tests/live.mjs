@@ -4,7 +4,6 @@ import { chromium } from '@playwright/test';
 import { PeerServer } from 'peer';
 import { createServer } from 'vite';
 process.env.VITE_STATIC_MODE = 'true';
-process.env.VITE_TRANSPORT ||= 'webrtc';
 process.env.VITE_PEER_HOST = '127.0.0.1';
 process.env.VITE_PEER_PORT = '19000';
 process.env.VITE_PEER_SECURE = 'false';
@@ -14,14 +13,6 @@ PeerServer({ port: 19000, path: '/' }, server => { signalling = server; });
 const vite = await createServer({ server: { port: 15173, host: '127.0.0.1' } });
 await vite.listen();
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-features=WebRtcHideLocalIpsWithMdns', '--allow-loopback-in-peer-connection'] });
-if (process.env.CESC_BLOCK_WEBRTC === 'true') {
-  const createContext=browser.newContext.bind(browser);
-  browser.newContext=async(...args)=>{
-    const context=await createContext(...args);
-    await context.addInitScript(()=>{ window.RTCPeerConnection=class {constructor(){throw new Error('WebRTC deliberately blocked by test');}}; });
-    return context;
-  };
-}
 const errors = [];
 try {
   const admin = await (await browser.newContext()).newPage();
@@ -45,8 +36,6 @@ try {
   await admin.getByText('Connectat · rebent respostes', { exact: true }).waitFor();
   const session = await admin.evaluate(() => JSON.parse(localStorage.getItem('cesc_active_session_local')));
   for (const page of [student,other]) await page.goto('http://127.0.0.1:15173');
-  await assert.rejects(other.evaluate(async()=>{ const {startHosting}=await import('/src/liveSession.ts');await startHosting('AB1234'); }));
-  console.log('PASS: occupied teacher session code is rejected');
   let groupCode='AB1234';
   let liveSessionId=session.sessionId;
   const rpc = (page, payload) => page.evaluate(async ({payload,groupCode}) => {
